@@ -259,9 +259,8 @@ class AccountAgent:
             mod_list_purpose = os.getenv('MOD_LIST_PURPOSE', 'Automatically synchronized blocks')
             
             try:
-                # Check if we already have a list - fixed method name from getLists to get_lists
-                # Add empty params dict as required argument
-                lists = self.client.app.bsky.graph.get_lists(params={})
+                # Check if we already have a list
+                lists = self.client.app.bsky.graph.get_lists()
                 existing_list = None
                 
                 for lst in lists.lists:
@@ -278,12 +277,12 @@ class AccountAgent:
                     logger.info("Creating new moderation list")
                     purpose = models.AppBskyGraphDefs.ListPurpose.MODLIST
                     
-                    # Fixed method: list.create -> list_create with params dict
-                    create_response = self.client.app.bsky.graph.list_create(params={
-                        'purpose': purpose,
-                        'name': mod_list_name,
-                        'description': os.getenv('MOD_LIST_DESCRIPTION', 'Synchronized blocks')
-                    })
+                    # Create list using the built-in method
+                    create_response = self.client.app.bsky.graph.list.create(
+                        purpose=purpose,
+                        name=mod_list_name,
+                        description=os.getenv('MOD_LIST_DESCRIPTION', 'Synchronized blocks')
+                    )
                     
                     list_uri = create_response.uri
                     list_cid = create_response.cid
@@ -304,17 +303,10 @@ class AccountAgent:
                     for account in chunk:
                         did = account['did']
                         try:
-                            # Use com.atproto.repo.create_record for robustness
-                            block_record = models.AppBskyGraphBlock(
-                                subject=did,
-                                created_at=self.client.get_current_time_iso()
-                            )
-                            self.client.com.atproto.repo.create_record(
-                                data=models.ComAtprotoRepoCreateRecord.Data(
-                                    repo=self.did,
-                                    collection=models.ids.AppBskyGraphBlock,
-                                    record=block_record
-                                )
+                            # Direct API call to create a block using built-in method without params
+                            # This matches format used by the original SDK
+                            self.client.app.bsky.graph.block.create(
+                                subject=did  # The ID of the account to block
                             )
                             logger.debug(f"Successfully sent block request for account {did}")
                             
@@ -354,6 +346,45 @@ class AccountAgent:
                 return True
             except Exception as e:
                 logger.error(f"Error syncing blocks: {e}")
+                # Try the raw XRPC approach as a fallback
+                if "actor" in str(e) and "Field required" in str(e):
+                    logger.info("Attempting direct XRPC approach for blocking accounts...")
+                    # Use raw XRPC call for creating blocks
+                    try:
+                        raw_create_count = 0
+                        for account in blocked_accounts[:25]:  # Just try a few to see if it works
+                            did = account['did']
+                            try:
+                                # Raw XRPC call with correct field structure
+                                block_record = {
+                                    "subject": did,
+                                    "createdAt": self.client.get_current_time_iso()
+                                }
+                                
+                                self.client.com.atproto.repo.create_record({
+                                    "repo": self.did,
+                                    "collection": "app.bsky.graph.block",
+                                    "record": block_record
+                                })
+                                
+                                dids_to_mark_synced.append(did)
+                                raw_create_count += 1
+                                logger.debug(f"Raw XRPC block created for {did}")
+                                
+                                await asyncio.sleep(0.5)  # Small delay between operations
+                            except Exception as raw_error:
+                                if "duplicate" in str(raw_error).lower():
+                                    dids_to_mark_synced.append(did)
+                                else:
+                                    logger.error(f"Raw XRPC block error for {did}: {raw_error}")
+                        
+                        if dids_to_mark_synced:
+                            self.database.mark_accounts_as_synced(dids_to_mark_synced)
+                            logger.info(f"Raw XRPC approach: Marked {len(dids_to_mark_synced)} accounts as synced")
+                            return True
+                    except Exception as raw_attempt_error:
+                        logger.error(f"Raw XRPC approach failed: {raw_attempt_error}")
+                
                 return False
                 
         except Exception as e:
