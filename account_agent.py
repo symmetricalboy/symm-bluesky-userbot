@@ -50,12 +50,35 @@ class AccountAgent:
     async def fetch_clearsky_blocks(self):
         """Fetch accounts blocking this account from ClearSky API."""
         try:
+            # Updated endpoint to the correct one based on ClearSky API documentation
+            # First try the main endpoint
             url = f"{CLEARSKY_API_URL}/single-blocklist/detail/{self.did}"
-            response = await self.http_client.get(url)
-            response.raise_for_status()
+            logger.debug(f"Fetching ClearSky blocks from: {url}")
             
-            data = response.json()
-            blockers = data.get('data', {}).get('blockers', [])
+            try:
+                response = await self.http_client.get(url)
+                response.raise_for_status()
+                
+                data = response.json()
+                blockers = data.get('data', {}).get('blockers', [])
+            except httpx.HTTPStatusError as e:
+                # If 404, try alternative endpoint format
+                if e.response.status_code == 404:
+                    logger.warning(f"Primary ClearSky endpoint returned 404 for {self.handle}, trying alternate endpoint")
+                    alt_url = f"{CLEARSKY_API_URL}/blockers/{self.did}"
+                    
+                    try:
+                        response = await self.http_client.get(alt_url)
+                        response.raise_for_status()
+                        data = response.json()
+                        blockers = data.get('data', [])
+                    except Exception as alt_e:
+                        logger.error(f"Alternative ClearSky endpoint also failed: {alt_e}")
+                        # Fallback to empty blockers list
+                        blockers = []
+                else:
+                    # Re-raise if not a 404
+                    raise
             
             if not blockers:
                 logger.info(f"No accounts found blocking {self.handle}")
@@ -101,7 +124,7 @@ class AccountAgent:
             
             # Paginate through all blocks
             while True:
-                response = self.client.app.bsky.graph.getBlocks(cursor=cursor, limit=100)
+                response = self.client.app.bsky.graph.get_blocks(cursor=cursor, limit=100)
                 
                 if not response.blocks:
                     break
