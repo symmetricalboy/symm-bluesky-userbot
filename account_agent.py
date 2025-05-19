@@ -349,6 +349,7 @@ class AccountAgent:
                 # Try the raw XRPC approach as a fallback
                 if "actor" in str(e) and "Field required" in str(e):
                     logger.info("Attempting direct XRPC approach for blocking accounts...")
+                    dids_to_mark_synced = []
                     # Use raw XRPC call for creating blocks
                     try:
                         raw_create_count = 0
