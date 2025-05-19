@@ -300,7 +300,8 @@ class AccountAgent:
                             # Add to block list with params dict
                             self.client.app.bsky.graph.block_create(params={
                                 'repo': self.did,
-                                'subject': did
+                                'subject': did,
+                                'actor': self.did  # Add the required actor field
                             })
                             logger.info(f"Blocked account {did}")
                             
