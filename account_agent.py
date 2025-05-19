@@ -257,7 +257,8 @@ class AccountAgent:
             
             try:
                 # Check if we already have a list - fixed method name from getLists to get_lists
-                lists = self.client.app.bsky.graph.get_lists()
+                # Add empty params dict as required argument
+                lists = self.client.app.bsky.graph.get_lists(params={})
                 existing_list = None
                 
                 for lst in lists.lists:
@@ -274,12 +275,12 @@ class AccountAgent:
                     logger.info("Creating new moderation list")
                     purpose = models.AppBskyGraphDefs.ListPurpose.MODLIST
                     
-                    # Fixed method: list.create -> list_create
-                    create_response = self.client.app.bsky.graph.list_create(
-                        purpose=purpose,
-                        name=mod_list_name,
-                        description=os.getenv('MOD_LIST_DESCRIPTION', 'Synchronized blocks')
-                    )
+                    # Fixed method: list.create -> list_create with params dict
+                    create_response = self.client.app.bsky.graph.list_create(params={
+                        'purpose': purpose,
+                        'name': mod_list_name,
+                        'description': os.getenv('MOD_LIST_DESCRIPTION', 'Synchronized blocks')
+                    })
                     
                     list_uri = create_response.uri
                     list_cid = create_response.cid
@@ -296,11 +297,11 @@ class AccountAgent:
                     for account in chunk:
                         did = account['did']
                         try:
-                            # Add to block list
-                            self.client.app.bsky.graph.block_create(
-                                repo=self.did,
-                                subject=did
-                            )
+                            # Add to block list with params dict
+                            self.client.app.bsky.graph.block_create(params={
+                                'repo': self.did,
+                                'subject': did
+                            })
                             logger.info(f"Blocked account {did}")
                             
                             dids_to_mark_synced.append(did)
