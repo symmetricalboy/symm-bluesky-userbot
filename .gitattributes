@@ -1,0 +1,13 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Python files
+*.py text eol=lf
+*.pyw text eol=lf
+
+# Config files
+*.env text eol=lf
+*.example text eol=lf
+
+# Documentation
+*.md text eol=lf 
