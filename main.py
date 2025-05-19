@@ -170,20 +170,30 @@ async def main():
             logger.error("Failed to initialize agents, exiting")
             return 1
         
-        # Start monitoring
-        await start_agents()
-        
-        # Run until shutdown signal
-        logger.info("Bot system is running. Press CTRL+C to exit.")
-        await shutdown_event.wait()
+        try:
+            # Start monitoring
+            await start_agents()
+            
+            # Run until shutdown signal
+            logger.info("Bot system is running. Press CTRL+C to exit.")
+            await shutdown_event.wait()
+        except Exception as monitor_error:
+            logger.error(f"Error during monitoring: {monitor_error}")
+            # If there's an error during monitoring, we still want to try to shut down gracefully
         
         # Shutdown
-        await shutdown_agents()
-        logger.info("Bot system shutdown complete")
+        try:
+            await shutdown_agents()
+            logger.info("Bot system shutdown complete")
+        except Exception as shutdown_error:
+            logger.error(f"Error during shutdown: {shutdown_error}")
         
         return 0
     except Exception as e:
         logger.error(f"Unhandled error in main: {e}")
+        # Print full traceback for easier debugging
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return 1
 
 if __name__ == "__main__":

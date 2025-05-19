@@ -50,36 +50,58 @@ class AccountAgent:
     async def fetch_clearsky_blocks(self):
         """Fetch accounts blocking this account from ClearSky API."""
         try:
-            # Updated endpoint to the correct one based on ClearSky API documentation
-            # First try the main endpoint
-            url = f"{CLEARSKY_API_URL}/single-blocklist/detail/{self.did}"
-            logger.debug(f"Fetching ClearSky blocks from: {url}")
+            # Try multiple ClearSky API endpoints to find one that works
+            endpoints_to_try = [
+                # Original endpoint
+                f"{CLEARSKY_API_URL}/single-blocklist/detail/{self.did}",
+                # Alternative endpoint
+                f"{CLEARSKY_API_URL}/blockers/{self.did}",
+                # Another possible format
+                f"{CLEARSKY_API_URL}/blockers/detail/{self.did}",
+                # Try with API v2 if v1 fails
+                f"{CLEARSKY_API_URL.replace('/v1', '/v2')}/blockers/{self.did}",
+                # Last resort - try the general blocklist API
+                f"{CLEARSKY_API_URL}/lists/fun-facts"
+            ]
             
-            try:
-                response = await self.http_client.get(url)
-                response.raise_for_status()
-                
-                data = response.json()
-                blockers = data.get('data', {}).get('blockers', [])
-            except httpx.HTTPStatusError as e:
-                # If 404, try alternative endpoint format
-                if e.response.status_code == 404:
-                    logger.warning(f"Primary ClearSky endpoint returned 404 for {self.handle}, trying alternate endpoint")
-                    alt_url = f"{CLEARSKY_API_URL}/blockers/{self.did}"
+            blockers = []
+            success = False
+            
+            for endpoint in endpoints_to_try:
+                logger.debug(f"Trying ClearSky endpoint: {endpoint}")
+                try:
+                    response = await self.http_client.get(endpoint)
+                    response.raise_for_status()
+                    data = response.json()
                     
-                    try:
-                        response = await self.http_client.get(alt_url)
-                        response.raise_for_status()
-                        data = response.json()
+                    # Extract blockers data based on the endpoint format
+                    if "single-blocklist/detail" in endpoint:
+                        blockers = data.get('data', {}).get('blockers', [])
+                    elif "blockers/detail" in endpoint:
+                        blockers = data.get('data', {}).get('blockers', [])
+                    elif "blockers" in endpoint:
                         blockers = data.get('data', [])
-                    except Exception as alt_e:
-                        logger.error(f"Alternative ClearSky endpoint also failed: {alt_e}")
-                        # Fallback to empty blockers list
-                        blockers = []
-                else:
-                    # Re-raise if not a 404
-                    raise
+                    elif "fun-facts" in endpoint:
+                        # Extract relevant data from fun-facts endpoint
+                        blocked_list = data.get('data', {}).get('blocked', [])
+                        # Filter to find if our account is in the list
+                        blockers = [b for b in blocked_list if b.get('did') == self.did]
+                    
+                    if blockers:
+                        logger.info(f"Successfully fetched blockers from {endpoint}")
+                        success = True
+                        break
+                    else:
+                        logger.warning(f"No blockers found at endpoint: {endpoint}")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to fetch from {endpoint}: {e}")
+                    continue
             
+            if not success:
+                logger.info(f"Could not fetch blockers for {self.handle} from any ClearSky endpoint")
+                return []
+                
             if not blockers:
                 logger.info(f"No accounts found blocking {self.handle}")
                 return []
@@ -124,17 +146,52 @@ class AccountAgent:
             
             # Paginate through all blocks
             while True:
-                response = self.client.app.bsky.graph.get_blocks(cursor=cursor, limit=100)
-                
-                if not response.blocks:
-                    break
+                try:
+                    # The correct way to call get_blocks - parameters need to be in the params dict
+                    params = {}
+                    if cursor:
+                        params['cursor'] = cursor
                     
-                blocking.extend(response.blocks)
-                
-                if not response.cursor:
-                    break
+                    # Limit is also a parameter
+                    params['limit'] = 100
                     
-                cursor = response.cursor
+                    # Make the API call the correct way
+                    response = self.client.app.bsky.graph.get_blocks(params=params)
+                    
+                    if not response.blocks:
+                        break
+                        
+                    blocking.extend(response.blocks)
+                    
+                    if not response.cursor:
+                        break
+                        
+                    cursor = response.cursor
+                except Exception as api_error:
+                    # More detailed error for debugging
+                    logger.error(f"API error in get_blocks for {self.handle}: {api_error}")
+                    # Try alternative approach
+                    try:
+                        logger.info(f"Trying alternative blocks fetch approach for {self.handle}")
+                        # Some versions might expect a positional argument
+                        if cursor:
+                            response = self.client.app.bsky.graph.get_blocks(cursor=cursor, limit=100)
+                        else:
+                            response = self.client.app.bsky.graph.get_blocks(limit=100)
+                            
+                        if not response.blocks:
+                            break
+                            
+                        blocking.extend(response.blocks)
+                        
+                        if not response.cursor:
+                            break
+                            
+                        cursor = response.cursor
+                    except Exception as alt_error:
+                        logger.error(f"Alternative approach also failed: {alt_error}")
+                        # No more options, break out of the loop
+                        break
             
             logger.info(f"Found {len(blocking)} accounts being blocked by {self.handle}")
             
