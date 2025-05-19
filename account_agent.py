@@ -9,6 +9,9 @@ from database import Database
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
+# Reduce verbosity of httpx library logger
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # API URLs - Using the correct ClearSky API base URL from symm-lol
 CLEARSKY_API_URL = os.getenv('CLEARSKY_API_URL', 'https://api.clearsky.services/api/v1/anon')
 BLUESKY_API_URL = os.getenv('BLUESKY_API_URL', 'https://bsky.social')
@@ -175,7 +178,7 @@ class AccountAgent:
                     logger.error(f"API error in get_blocks for {self.handle}: {api_error}")
                     # Try alternative approach
                     try:
-                        logger.info(f"Trying alternative blocks fetch approach for {self.handle}")
+                        logger.debug(f"Trying alternative blocks fetch approach for {self.handle}")
                         # Some versions might expect a positional argument
                         if cursor:
                             response = self.client.app.bsky.graph.get_blocks(cursor=cursor, limit=100)
@@ -289,38 +292,49 @@ class AccountAgent:
                     
                 # Add all blocked accounts to the list
                 dids_to_mark_synced = []
+                successfully_blocked_in_session = 0
                 chunk_size = 25  # Process in chunks to avoid rate limiting
                 
+                logger.info(f"Processing {len(blocked_accounts)} accounts in chunks of {chunk_size} to add to moderation list.")
+
                 for i in range(0, len(blocked_accounts), chunk_size):
                     chunk = blocked_accounts[i:i+chunk_size]
+                    chunk_blocked_count = 0
                     
                     for account in chunk:
                         did = account['did']
                         try:
-                            # Add to block list with params dict
-                            self.client.app.bsky.graph.block_create(params={
-                                'repo': self.did,
-                                'subject': did,
-                                'actor': self.did  # Add the required actor field
-                            })
-                            logger.info(f"Blocked account {did}")
+                            # Add to block list with direct keyword arguments
+                            self.client.app.bsky.graph.block_create(
+                                actor=self.did,  # The DID of the account performing the block
+                                subject=did      # The DID of the account to be blocked
+                            )
+                            logger.debug(f"Successfully sent block request for account {did}")
                             
                             dids_to_mark_synced.append(did)
+                            chunk_blocked_count += 1
+                            successfully_blocked_in_session += 1
                         except Exception as block_error:
                             if "duplicate" in str(block_error).lower():
                                 # Already blocked, still mark as synced
                                 dids_to_mark_synced.append(did)
-                                logger.debug(f"Account {did} already blocked")
+                                logger.debug(f"Account {did} already in block list (duplicate error). Marked for sync.")
                             else:
-                                logger.error(f"Error blocking account {did}: {block_error}")
+                                logger.error(f"Error adding account {did} to block list: {block_error}")
                     
-                    # Add a small delay between chunks
+                    if chunk_blocked_count > 0:
+                        logger.info(f"Successfully sent block requests for {chunk_blocked_count} accounts in this chunk.")
+                    
+                    logger.debug(f"Processed chunk {i//chunk_size + 1}/{(len(blocked_accounts) + chunk_size - 1)//chunk_size}. Sleeping for 1 sec.")
                     await asyncio.sleep(1)
                 
+                if successfully_blocked_in_session > 0:
+                     logger.info(f"Total {successfully_blocked_in_session} accounts successfully processed for block list addition in this sync session.")
+
                 # Mark accounts as synced in the database
                 if dids_to_mark_synced:
                     self.database.mark_accounts_as_synced(dids_to_mark_synced)
-                    logger.info(f"Marked {len(dids_to_mark_synced)} accounts as synced")
+                    logger.info(f"Marked {len(dids_to_mark_synced)} accounts as synced in the database (includes new and existing blocks).")
                 
                 # Register/update the moderation list in the database
                 self.database.register_mod_list(
