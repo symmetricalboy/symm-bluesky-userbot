@@ -3,7 +3,6 @@ import asyncio
 import logging
 import httpx
 from atproto import Client, FirehoseSubscribeReposClient, models
-from atproto_client.models.com.atproto.repo import CreateRecord
 from database import Database
 import time # Added for rate limiting delay
 
