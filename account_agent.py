@@ -260,7 +260,7 @@ class AccountAgent:
             
             try:
                 # Check if we already have a list
-                lists = self.client.app.bsky.graph.get_lists()
+                lists = self.client.app.bsky.graph.get_lists(params={})
                 existing_list = None
                 
                 for lst in lists.lists:
