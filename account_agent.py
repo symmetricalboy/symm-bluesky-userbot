@@ -304,10 +304,17 @@ class AccountAgent:
                     for account in chunk:
                         did = account['did']
                         try:
-                            # Add to block list with direct keyword arguments
-                            self.client.app.bsky.graph.block_create(
-                                actor=self.did,  # The DID of the account performing the block
-                                subject=did      # The DID of the account to be blocked
+                            # Use com.atproto.repo.create_record for robustness
+                            block_record = models.AppBskyGraphBlock(
+                                subject=did,
+                                created_at=self.client.get_current_time_iso()
+                            )
+                            self.client.com.atproto.repo.create_record(
+                                data=models.ComAtprotoRepoCreateRecord.Data(
+                                    repo=self.did,
+                                    collection=models.ids.AppBskyGraphBlock,
+                                    record=block_record
+                                )
                             )
                             logger.debug(f"Successfully sent block request for account {did}")
                             
