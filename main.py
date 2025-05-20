@@ -54,11 +54,31 @@ def is_database_setup():
         cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
         existing_tables = [row[0] for row in cursor.fetchall()]
         
+        # If accounts table exists, check for updated_at column
+        if 'accounts' in existing_tables:
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.columns 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'accounts' 
+                    AND column_name = 'updated_at'
+                )
+            """)
+            updated_at_exists = cursor.fetchone()[0]
+            if not updated_at_exists:
+                logger.info("accounts table exists but is missing updated_at column")
+                cursor.close()
+                conn.close()
+                return False
+        
         cursor.close()
         conn.close()
         
         # Check if all required tables exist
         all_tables_exist = all(table in existing_tables for table in required_tables)
+        if not all_tables_exist:
+            missing_tables = [table for table in required_tables if table not in existing_tables]
+            logger.info(f"Missing required tables: {', '.join(missing_tables)}")
         return all_tables_exist
         
     except Exception as e:
@@ -153,13 +173,20 @@ async def shutdown():
 async def main():
     """Main function to run the bot system."""
     try:
-        # Check and set up the database if needed
-        if not is_database_setup():
-            logger.info("Database not set up properly. Running setup...")
+        # Always run database setup at startup to ensure everything is configured correctly
+        try:
+            logger.info("Running database setup to ensure schema is up to date...")
             setup_database()
-            logger.info("Database setup completed")
-        else:
-            logger.info("Database already configured properly")
+            logger.info("Database setup completed successfully")
+        except Exception as db_error:
+            logger.error(f"Database setup failed: {db_error}")
+            logger.error("Cannot proceed without proper database setup, exiting")
+            return 1
+        
+        # Double-check that database is now properly set up
+        if not is_database_setup():
+            logger.error("Database setup ran but verification failed, cannot proceed")
+            return 1
             
         # Set up signal handlers
         handle_signals()
