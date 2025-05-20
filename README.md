@@ -22,9 +22,11 @@ This is a userbot for Bluesky that synchronizes blocks across multiple accounts.
 - Updated HTTP client to automatically follow redirects when interacting with external APIs
 - Fixed parameter naming in API calls from `record=` to `data=`
 - Added support for properly handling HTTP redirects from the ClearSky API
+- Fixed handle resolution by using `params={'repo': did}` instead of `repo=did` in the `describe_repo` method
 - Added testing commands for comprehensive verification:
   - `python main.py --test`: Test all system components without making changes
   - `python main.py --test-modlist`: Test moderation list functionality specifically
+  - `python test_handle_resolution.py`: Test DID to handle resolution with proper fallbacks
 
 ## Requirements
 

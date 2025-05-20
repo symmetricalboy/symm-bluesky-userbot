@@ -362,7 +362,7 @@ class AccountAgent:
         """Resolve a DID to a handle."""
         await asyncio.sleep(CLEARSKY_REQUEST_DELAY / 2) 
         try:
-            profile = self.client.com.atproto.repo.describe_repo(repo=did)
+            profile = self.client.com.atproto.repo.describe_repo(params={'repo': did})
             return profile.handle
         except Exception as e:
             logger.warning(f"Could not resolve handle for DID {did} via describe_repo: {e}. Falling back to ClearSky.")
