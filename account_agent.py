@@ -7,6 +7,7 @@ from database import Database
 import time # Added for rate limiting delay
 import psycopg2
 import psycopg2.extras
+from psycopg2.extras import RealDictCursor
 
 # Set up logging
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -244,10 +245,10 @@ class AccountAgent:
                     logger.warning(f"Skipping invalid DID received from ClearSky /single-blocklist: {did_blocker}")
                     continue
                 valid_dids_found.append(did_blocker)
-                handle_blocker = await self._resolve_handle(did_blocker)
+                # Skip handle resolution - just store the DID
                 self.database.add_blocked_account(
                     did=did_blocker,
-                    handle=handle_blocker,
+                    handle=None,  # No need to resolve handle
                     source_account_id=self.account_id,
                     block_type='blocked_by'
                 )
@@ -287,10 +288,10 @@ class AccountAgent:
                     logger.warning(f"Skipping invalid DID received from ClearSky /blocklist: {did_blocked}")
                     continue
                 valid_dids_found.append(did_blocked)
-                handle_blocked = await self._resolve_handle(did_blocked)
+                # Skip handle resolution - just store the DID
                 self.database.add_blocked_account(
                     did=did_blocked,
-                    handle=handle_blocked, 
+                    handle=None,  # No need to resolve handle
                     source_account_id=self.account_id,
                     block_type='blocking' 
                 )
@@ -358,29 +359,6 @@ class AccountAgent:
             logger.error(f"Error fetching Bluesky blocks for {self.handle}: {e}")
             return []
     
-    async def _resolve_handle(self, did):
-        """Resolve a DID to a handle."""
-        await asyncio.sleep(CLEARSKY_REQUEST_DELAY / 2) 
-        try:
-            profile = self.client.com.atproto.repo.describe_repo(params={'repo': did})
-            return profile.handle
-        except Exception as e:
-            logger.warning(f"Could not resolve handle for DID {did} via describe_repo: {e}. Falling back to ClearSky.")
-            try:
-                await asyncio.sleep(CLEARSKY_REQUEST_DELAY) 
-                # Ensure client is not closed
-                if self.http_client.is_closed:
-                    self.http_client = httpx.AsyncClient(timeout=60.0)
-
-                url = f"{CLEARSKY_API_BASE_URL}/get-handle/{did}"
-                response = await self.http_client.get(url)
-                response.raise_for_status()
-                data = response.json()
-                return data.get('data', {}).get('handle_identifier', did[:15] + '...')
-            except Exception as cs_e:
-                logger.error(f"Error resolving handle for {did} via ClearSky as well: {cs_e}")
-                return did[:15] + '...'
-    
     async def sync_blocks_from_others(self):
         """If this is the primary account, sync blocks from other managed accounts to its own blocklist."""
         if not self.is_primary:
@@ -421,7 +399,9 @@ class AccountAgent:
                     if block['already_blocked_by_primary']:
                         already_blocked_dids.append(block['did'])
                         self.database.mark_block_as_synced_by_primary(block['id'], self.account_id)
-                        logger.info(f"Found block for {block['handle']} ({block['did']}) that is already blocked by primary - will mark as synced")
+                        # Use DID if handle is not available
+                        account_identifier = block['handle'] if block['handle'] else block['did']
+                        logger.info(f"Found block for {account_identifier} ({block['did']}) that is already blocked by primary - will mark as synced")
                 
                 cursor.close()
                 conn.close()
@@ -552,12 +532,18 @@ class AccountAgent:
                         }
                     )
                     
-                    logger.info(f"Added {account['handle'] or account['did']} to moderation list")
+                    # Use DID if handle is not available
+                    account_identifier = account['handle'] if account['handle'] else account['did']
+                    logger.info(f"Added {account_identifier} to moderation list")
                 except Exception as e:
                     if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
-                        logger.info(f"Account {account['handle'] or account['did']} already in list - skipping")
+                        # Use DID if handle is not available
+                        account_identifier = account['handle'] if account['handle'] else account['did']
+                        logger.info(f"Account {account_identifier} already in list - skipping")
                     else:
-                        logger.error(f"Error adding {account['handle'] or account['did']} to moderation list: {e}")
+                        # Use DID if handle is not available
+                        account_identifier = account['handle'] if account['handle'] else account['did']
+                        logger.error(f"Error adding {account_identifier} to moderation list: {e}")
             
             logger.info(f"Finished updating moderation list")
         except Exception as e:
