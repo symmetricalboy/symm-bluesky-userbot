@@ -23,19 +23,23 @@ BLUESKY_API_URL = os.getenv('BLUESKY_API_URL', 'https://bsky.social')
 CLEARSKY_REQUEST_DELAY = 0.25 # 4 requests per second, just under 5 req/sec limit
 
 class AccountAgent:
-    def __init__(self, handle, password, is_primary=False):
+    def __init__(self, handle, password, is_primary=False, database=None):
         self.handle = handle
         self.password = password
         self.is_primary = is_primary
         self.client = Client(base_url=BLUESKY_API_URL)
-        self.database = Database()
+        self.database = database if database else Database()
         self.account_id = None
         self.did = None
         self.blocks_monitor_task = None
         self.firehose_monitor_task = None
-        # Increased timeout for HTTP client
-        self.http_client = httpx.AsyncClient(timeout=60.0)
+        # Increased timeout for HTTP client and enable redirect following
+        self.http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
         self.mod_list_uri = None
+    
+    async def initialize(self):
+        """Initialize the account agent by logging in and registering in the database."""
+        return await self.login()
         
     async def login(self):
         """Login to the Bluesky account and register in the database."""
@@ -68,7 +72,7 @@ class AccountAgent:
                 try:
                     await self.create_or_update_moderation_list()
                 except Exception as e:
-                    logger.error(f"Failed to create moderation list for primary account {self.handle}: {e}")
+                    logger.error(f"Error creating/updating moderation list for {self.handle}: {e}")
                 
             return True
             
@@ -91,17 +95,19 @@ class AccountAgent:
         try:
             logger.info(f"Creating or updating moderation list for primary account {self.handle}...")
             
-            # Create the moderation list record
-            list_record = models.AppBskyGraphList(
-                purpose="app.bsky.graph.defs#modlist",
-                name=list_name,
-                description=list_description,
-                created_at=self.client.get_current_time_iso()
-            )
+            # Create the moderation list record as a direct dictionary
+            # This is correct - we should NOT use models.AppBskyGraphList as a constructor
+            list_record = {
+                "$type": "app.bsky.graph.list",
+                "purpose": "app.bsky.graph.defs#modlist",
+                "name": list_name,
+                "description": list_description,
+                "createdAt": self.client.get_current_time_iso()
+            }
             
             # First try to get existing lists to see if we already have one
             try:
-                lists_response = self.client.app.bsky.graph.get_lists()
+                lists_response = self.client.app.bsky.graph.get_lists(params={"actor": self.did})
                 existing_lists = lists_response.lists
                 existing_list = None
                 
@@ -117,10 +123,12 @@ class AccountAgent:
             if existing_list:
                 # Update existing list
                 response = self.client.com.atproto.repo.put_record(
-                    repo=self.did,
-                    collection=models.ids.AppBskyGraphList,
-                    rkey=existing_list.uri.split('/')[-1],
-                    record=list_record
+                    data={
+                        "repo": self.did,
+                        "collection": "app.bsky.graph.list",
+                        "rkey": existing_list.uri.split('/')[-1],
+                        "record": list_record
+                    }
                 )
                 list_uri = existing_list.uri
                 list_cid = response.cid
@@ -128,9 +136,11 @@ class AccountAgent:
             else:
                 # Create new list
                 response = self.client.com.atproto.repo.create_record(
-                    repo=self.did,
-                    collection=models.ids.AppBskyGraphList,
-                    record=list_record
+                    data={
+                        "repo": self.did,
+                        "collection": "app.bsky.graph.list",
+                        "record": list_record
+                    }
                 )
                 list_uri = response.uri
                 list_cid = response.cid
@@ -174,10 +184,21 @@ class AccountAgent:
                 
                 current_page_dids = []
                 
-                if endpoint_template.startswith("/blockedby"):
-                    current_page_dids = data.get('data', {}).get('blocked_by_list', [])
+                # Handle both single-blocklist and blocklist endpoints
+                if endpoint_template.startswith("/single-blocklist"):
+                    # Who is blocking this account
+                    blocklist = data.get('data', {}).get('blocklist', [])
+                    if blocklist is None:
+                        logger.debug(f"No DIDs found on single-blocklist endpoint for {url}")
+                        break
+                    current_page_dids = [item['did'] for item in blocklist]
                 elif endpoint_template.startswith("/blocklist"): 
-                    current_page_dids = data.get('data', []) 
+                    # Who this account is blocking
+                    blocklist = data.get('data', {}).get('blocklist', [])
+                    if blocklist is None:
+                        logger.debug(f"No DIDs found on blocklist endpoint for {url}")
+                        break
+                    current_page_dids = [item['did'] for item in blocklist]
                 else:
                     logger.warning(f"Unknown endpoint template structure for pagination: {endpoint_template}")
                     break
@@ -212,14 +233,15 @@ class AccountAgent:
     async def fetch_who_is_blocking_me_from_clearsky(self):
         """Fetch DIDs of accounts blocking this account from ClearSky API."""
         logger.info(f"Fetching who is blocking {self.handle} from ClearSky...")
-        blocking_me_dids = await self._fetch_paginated_clearsky_list("/blockedby/{did}")
+        # Use the correct endpoint /single-blocklist/{did} instead of /blockedby/{did}
+        blocking_me_dids = await self._fetch_paginated_clearsky_list("/single-blocklist/{did}")
         
         if blocking_me_dids:
             logger.info(f"Found {len(blocking_me_dids)} accounts blocking {self.handle} via ClearSky.")
             valid_dids_found = []
             for did_blocker in blocking_me_dids:
                 if not isinstance(did_blocker, str) or not did_blocker.startswith("did:"):
-                    logger.warning(f"Skipping invalid DID received from ClearSky /blockedby: {did_blocker}")
+                    logger.warning(f"Skipping invalid DID received from ClearSky /single-blocklist: {did_blocker}")
                     continue
                 valid_dids_found.append(did_blocker)
                 handle_blocker = await self._resolve_handle(did_blocker)
@@ -231,7 +253,7 @@ class AccountAgent:
                 )
             self.database.remove_stale_blocks(self.account_id, 'blocked_by', valid_dids_found)
         else:
-            logger.info(f"No accounts found blocking {self.handle} via ClearSky /blockedby endpoint.")
+            logger.info(f"No accounts found blocking {self.handle} via ClearSky /single-blocklist endpoint.")
             await asyncio.sleep(CLEARSKY_REQUEST_DELAY * 2) 
             try:
                 fun_facts_url = f"{CLEARSKY_API_BASE_URL}/lists/fun-facts"
@@ -291,7 +313,7 @@ class AccountAgent:
                     if cursor:
                         params['cursor'] = cursor
                     
-                    # Correct way to call get_blocks - actor goes as a regular param, not in params dict
+                    # Correct way to call get_blocks - params dict is passed to params parameter
                     response = self.client.app.bsky.graph.get_blocks(params=params)
                     
                     if not response.blocks:
@@ -399,7 +421,7 @@ class AccountAgent:
                     if block['already_blocked_by_primary']:
                         already_blocked_dids.append(block['did'])
                         self.database.mark_block_as_synced_by_primary(block['id'], self.account_id)
-                        logger.info(f"Marked block for {block['handle']} ({block['did']}) as synced - already blocked by primary")
+                        logger.info(f"Found block for {block['handle']} ({block['did']}) that is already blocked by primary - will mark as synced")
                 
                 cursor.close()
                 conn.close()
@@ -429,19 +451,21 @@ class AccountAgent:
 
                     logger.debug(f"Primary account {self.handle} attempting to block DID: {blocked_did_to_sync}")
                     try:
-                        record_data = models.AppBskyGraphBlock(
-                            subject=blocked_did_to_sync,
-                            created_at=self.client.get_current_time_iso()
-                        )
+                        # Create a block record as a direct dictionary
+                        record_data = {
+                            "$type": "app.bsky.graph.block",
+                            "subject": blocked_did_to_sync,
+                            "createdAt": self.client.get_current_time_iso()
+                        }
                         
                         # Use the standard client method for creating a record.
-                        # The 'actor' is implicitly self.did from the authenticated client.
-                        # The 'repo' is self.did.
+                        # Pass data to the data parameter, not as a mixture of params and record
                         response = self.client.com.atproto.repo.create_record(
-                            repo=self.did,
-                            collection=models.ids.AppBskyGraphBlock,
-                            # rkey can be omitted for app.bsky.graph.block, server generates it.
-                            record=record_data 
+                            data={
+                                "repo": self.did,
+                                "collection": "app.bsky.graph.block",
+                                "record": record_data
+                            }
                         )
                         logger.info(f"Primary account {self.handle} successfully blocked {blocked_did_to_sync}. URI: {response.uri}")
                         # Mark this specific block instance as synced by this primary account
@@ -497,7 +521,8 @@ class AccountAgent:
             
             # Get the current list items
             try:
-                current_items = self.client.app.bsky.graph.get_list_items(list=self.mod_list_uri).items
+                list_details = self.client.app.bsky.graph.get_list(params={"list": self.mod_list_uri})
+                current_items = list_details.items
                 current_item_subjects = [item.subject.did for item in current_items]
                 logger.info(f"Found {len(current_items)} existing items in moderation list")
             except Exception as e:
@@ -512,16 +537,19 @@ class AccountAgent:
                     
                 try:
                     # Add the account to the moderation list
-                    item_record = models.AppBskyGraphListitem(
-                        subject=account['did'],
-                        list=self.mod_list_uri,
-                        created_at=self.client.get_current_time_iso()
-                    )
+                    item_record = {
+                        "$type": "app.bsky.graph.listitem",
+                        "subject": account['did'],
+                        "list": self.mod_list_uri,
+                        "createdAt": self.client.get_current_time_iso()
+                    }
                     
                     response = self.client.com.atproto.repo.create_record(
-                        repo=self.did,
-                        collection=models.ids.AppBskyGraphListitem,
-                        record=item_record
+                        data={
+                            "repo": self.did,
+                            "collection": "app.bsky.graph.listitem",
+                            "record": item_record
+                        }
                     )
                     
                     logger.info(f"Added {account['handle'] or account['did']} to moderation list")

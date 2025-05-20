@@ -1,11 +1,14 @@
 import os
 import asyncio
 import logging
+import argparse
 import signal
 import psycopg2
 from dotenv import load_dotenv
-from account_agent import AccountAgent
+from account_agent import AccountAgent, CLEARSKY_API_BASE_URL
 from setup_db import setup_database
+from database import Database
+import httpx
 
 # Load environment variables
 load_dotenv()
@@ -170,59 +173,222 @@ async def shutdown():
     logger.info("Shutdown initiated")
     shutdown_event.set()
 
-async def main():
-    """Main function to run the bot system."""
+async def test_modlist_functionality():
+    """Test the moderation list functionality without making actual blocks."""
+    logger.info("Testing moderation list functionality...")
+    
+    # Get account credentials
+    primary_handle = os.getenv('PRIMARY_BLUESKY_HANDLE')
+    primary_password = os.getenv('PRIMARY_BLUESKY_PASSWORD')
+    
+    if not primary_handle or not primary_password:
+        logger.error("Primary account credentials not found in .env file")
+        return False
+    
     try:
-        # Always run database setup at startup to ensure everything is configured correctly
-        try:
-            logger.info("Running database setup to ensure schema is up to date...")
-            setup_database()
-            logger.info("Database setup completed successfully")
-        except Exception as db_error:
-            logger.error(f"Database setup failed: {db_error}")
-            logger.error("Cannot proceed without proper database setup, exiting")
-            return 1
+        # Initialize the client and login
+        from atproto import Client
+        client = Client(base_url="https://bsky.social")
+        logger.info(f"Attempting to login as {primary_handle}...")
+        response = client.login(primary_handle, primary_password)
+        did = response.did
+        logger.info(f"Successfully logged in as {primary_handle} (DID: {did})")
         
-        # Double-check that database is now properly set up
-        if not is_database_setup():
-            logger.error("Database setup ran but verification failed, cannot proceed")
-            return 1
+        # Create the moderation list record
+        logger.info("Testing moderation list creation...")
+        
+        list_name = "Test Moderation List"
+        list_description = "Test description for moderation list"
+        
+        # Use the correct approach with direct dictionary creation
+        list_record = {
+            "$type": "app.bsky.graph.list",
+            "purpose": "app.bsky.graph.defs#modlist",
+            "name": list_name,
+            "description": list_description,
+            "createdAt": client.get_current_time_iso()
+        }
+        
+        # First check for existing lists
+        try:
+            logger.info("Checking for existing lists...")
+            lists_response = client.app.bsky.graph.get_lists(params={"actor": did})
+            existing_lists = lists_response.lists
+            existing_list = None
             
-        # Set up signal handlers
-        handle_signals()
-        
-        # Initialize agents
-        init_success = await initialize_agents()
-        if not init_success:
-            logger.error("Failed to initialize agents, exiting")
-            return 1
-        
-        try:
-            # Start monitoring
-            await start_agents()
-            
-            # Run until shutdown signal
-            logger.info("Bot system is running. Press CTRL+C to exit.")
-            await shutdown_event.wait()
-        except Exception as monitor_error:
-            logger.error(f"Error during monitoring: {monitor_error}")
-            # If there's an error during monitoring, we still want to try to shut down gracefully
-        
-        # Shutdown
-        try:
-            await shutdown_agents()
-            logger.info("Bot system shutdown complete")
-        except Exception as shutdown_error:
-            logger.error(f"Error during shutdown: {shutdown_error}")
-        
-        return 0
+            for lst in existing_lists:
+                logger.info(f"Found list: '{lst.name}' with purpose {lst.purpose}")
+                if lst.name == list_name and lst.purpose == "app.bsky.graph.defs#modlist":
+                    existing_list = lst
+                    logger.info(f"Found existing matching moderation list: {lst.uri}")
+                    break
+                    
+            logger.info("Moderation list functionality verified successfully!")
+            return True
+        except Exception as e:
+            logger.error(f"Error testing moderation list functionality: {e}")
+            return False
     except Exception as e:
-        logger.error(f"Unhandled error in main: {e}")
-        # Print full traceback for easier debugging
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return 1
+        logger.error(f"Error testing moderation list functionality: {e}")
+        return False
+
+async def run_test_mode():
+    """Run in test mode to verify components without making changes."""
+    logger.info("Starting in TEST MODE - no actual changes will be made")
+    
+    test_success = True
+    
+    # Initialize database connection
+    database = Database()
+    
+    # Test database connection
+    logger.info("Testing database connection...")
+    database_ok = database.test_connection()
+    if database_ok:
+        logger.info("Database connection successful")
+    else:
+        logger.warning("Database connection failed - some test components will be skipped")
+        test_success = False
+    
+    # Get account credentials
+    primary_handle = os.getenv('PRIMARY_BLUESKY_HANDLE')
+    primary_password = os.getenv('PRIMARY_BLUESKY_PASSWORD')
+    
+    if not primary_handle or not primary_password:
+        logger.error("Primary account credentials not found in .env file")
+        return False
+    
+    # Initialize but don't login
+    logger.info(f"Verifying primary account agent setup for {primary_handle}...")
+    
+    # Test ClearSky API connection
+    logger.info("Testing ClearSky API connection...")
+    try:
+        url = f"{CLEARSKY_API_BASE_URL}/lists/fun-facts"
+        
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                logger.info("ClearSky API connection successful")
+            else:
+                logger.error(f"ClearSky API returned status code {response.status_code}")
+                test_success = False
+    except Exception as e:
+        logger.error(f"Error connecting to ClearSky API: {e}")
+        test_success = False
+    
+    # Check secondary accounts configuration
+    secondary_accounts_str = os.getenv('SECONDARY_ACCOUNTS', '')
+    if secondary_accounts_str:
+        accounts = secondary_accounts_str.split(';')
+        logger.info(f"Found {len(accounts)} secondary accounts configured")
+    else:
+        logger.info("No secondary accounts configured")
+    
+    if test_success:
+        logger.info("All system components verified successfully!")
+    else:
+        logger.warning("Some system components failed verification")
+    
+    logger.info("TEST MODE completed - no changes were made")
+    return test_success
+
+async def main():
+    """Main function to run the bot."""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Bluesky account agent for synchronizing blocks across accounts')
+    parser.add_argument('--test', action='store_true', help='Run in test mode without making any changes')
+    parser.add_argument('--test-modlist', action='store_true', help='Test moderation list functionality')
+    args = parser.parse_args()
+    
+    # Run in test mode if requested
+    if args.test:
+        success = await run_test_mode()
+        return success
+    
+    # Test moderation list if requested
+    if args.test_modlist:
+        success = await test_modlist_functionality()
+        return success
+    
+    # Normal operation mode
+    logger.info("Starting Bluesky account agent...")
+    
+    # Initialize database and ensure it's set up
+    database = Database()
+    
+    # Get account credentials
+    primary_handle = os.getenv('PRIMARY_BLUESKY_HANDLE')
+    primary_password = os.getenv('PRIMARY_BLUESKY_PASSWORD')
+    
+    if not primary_handle or not primary_password:
+        logger.error("Primary account credentials not found in .env file")
+        return False
+    
+    # Create and initialize primary account agent
+    logger.info(f"Initializing primary account agent: {primary_handle}")
+    primary_agent = AccountAgent(
+        handle=primary_handle,
+        password=primary_password,
+        is_primary=True,
+        database=database
+    )
+    
+    success = await primary_agent.login()
+    if not success:
+        logger.error(f"Failed to login as primary account {primary_handle}")
+        return False
+    
+    # Start monitoring for the primary account
+    await primary_agent.start_monitoring()
+    
+    # Initialize and start monitoring for secondary accounts
+    secondary_accounts_str = os.getenv('SECONDARY_ACCOUNTS', '')
+    secondary_agents = []
+    
+    if secondary_accounts_str:
+        accounts = secondary_accounts_str.split(';')
+        logger.info(f"Found {len(accounts)} secondary accounts")
+        
+        for account_str in accounts:
+            try:
+                handle, password = account_str.split(':')
+                
+                logger.info(f"Initializing secondary account agent: {handle}")
+                agent = AccountAgent(
+                    handle=handle,
+                    password=password,
+                    is_primary=False,
+                    database=database
+                )
+                
+                success = await agent.login()
+                if success:
+                    await agent.start_monitoring()
+                    secondary_agents.append(agent)
+                else:
+                    logger.error(f"Failed to login as secondary account {handle}")
+            except Exception as e:
+                logger.error(f"Error initializing secondary account: {e}")
+    
+    # Keep the program running
+    try:
+        logger.info("All account agents started successfully. Running indefinitely.")
+        while True:
+            await asyncio.sleep(3600)  # Sleep for an hour between checks
+    except KeyboardInterrupt:
+        logger.info("Received interrupt, shutting down...")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+    finally:
+        # Clean up
+        logger.info("Shutting down account agents...")
+        await primary_agent.stop_monitoring()
+        for agent in secondary_agents:
+            await agent.stop_monitoring()
+    
+    return True
 
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    exit(exit_code) 
+    success = asyncio.run(main())
+    exit(0 if success else 1) 

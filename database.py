@@ -45,6 +45,20 @@ class Database:
         """Get a database connection using the global connection function."""
         return get_connection()
     
+    def test_connection(self):
+        """Test the database connection by executing a simple query."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            return result[0] == 1
+        except Exception as e:
+            logger.error(f"Database connection test failed: {e}")
+            return False
+    
     def register_account(self, handle, did, is_primary=False):
         """Register a managed account in the database."""
         conn = self.get_connection()
