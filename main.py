@@ -352,7 +352,18 @@ async def main():
         
         for account_str in accounts:
             try:
-                handle, password = account_str.split(':')
+                # Try various separator formats (comma or colon)
+                if ':' in account_str:
+                    handle, password = account_str.split(':', 1)
+                elif ',' in account_str:
+                    handle, password = account_str.split(',', 1)
+                else:
+                    logger.error(f"Invalid account format: {account_str}. Expected format: 'handle:password' or 'handle,password'")
+                    continue
+                
+                # Trim any whitespace
+                handle = handle.strip()
+                password = password.strip()
                 
                 logger.info(f"Initializing secondary account agent: {handle}")
                 agent = AccountAgent(

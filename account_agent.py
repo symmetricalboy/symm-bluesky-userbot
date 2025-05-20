@@ -509,43 +509,64 @@ class AccountAgent:
                 logger.warning(f"Could not fetch current list items: {e}")
                 current_item_subjects = []
             
-            # Add all blocked accounts to the list
-            for account in blocked_accounts:
-                # Skip if this DID is already in the list
-                if account['did'] in current_item_subjects:
-                    continue
-                    
-                try:
-                    # Add the account to the moderation list
-                    item_record = {
-                        "$type": "app.bsky.graph.listitem",
-                        "subject": account['did'],
-                        "list": self.mod_list_uri,
-                        "createdAt": self.client.get_current_time_iso()
-                    }
-                    
-                    response = self.client.com.atproto.repo.create_record(
-                        data={
-                            "repo": self.did,
-                            "collection": "app.bsky.graph.listitem",
-                            "record": item_record
-                        }
-                    )
-                    
-                    # Use DID if handle is not available
-                    account_identifier = account['handle'] if account['handle'] else account['did']
-                    logger.info(f"Added {account_identifier} to moderation list")
-                except Exception as e:
-                    if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
-                        # Use DID if handle is not available
-                        account_identifier = account['handle'] if account['handle'] else account['did']
-                        logger.info(f"Account {account_identifier} already in list - skipping")
-                    else:
-                        # Use DID if handle is not available
-                        account_identifier = account['handle'] if account['handle'] else account['did']
-                        logger.error(f"Error adding {account_identifier} to moderation list: {e}")
+            # Process blocks in batches to avoid overwhelming the API
+            batch_size = 50
+            total_added = 0
             
-            logger.info(f"Finished updating moderation list")
+            for i in range(0, len(blocked_accounts), batch_size):
+                batch = blocked_accounts[i:i+batch_size]
+                logger.info(f"Processing batch {i//batch_size + 1}/{(len(blocked_accounts) + batch_size - 1)//batch_size} of blocks")
+                
+                # Add all blocked accounts in this batch to the list
+                batch_added = 0
+                
+                for account in batch:
+                    # Skip if this DID is already in the list
+                    if account['did'] in current_item_subjects:
+                        continue
+                        
+                    try:
+                        # Add the account to the moderation list
+                        item_record = {
+                            "$type": "app.bsky.graph.listitem",
+                            "subject": account['did'],
+                            "list": self.mod_list_uri,
+                            "createdAt": self.client.get_current_time_iso()
+                        }
+                        
+                        response = self.client.com.atproto.repo.create_record(
+                            data={
+                                "repo": self.did,
+                                "collection": "app.bsky.graph.listitem",
+                                "record": item_record
+                            }
+                        )
+                        
+                        # Use DID if handle is not available
+                        account_identifier = account['handle'] if account['handle'] else account['did']
+                        logger.info(f"Added {account_identifier} to moderation list")
+                        batch_added += 1
+                        current_item_subjects.append(account['did'])  # Add to our tracking list to avoid duplicates
+                        
+                    except Exception as e:
+                        if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+                            # Use DID if handle is not available
+                            account_identifier = account['handle'] if account['handle'] else account['did']
+                            logger.info(f"Account {account_identifier} already in list - skipping")
+                            current_item_subjects.append(account['did'])  # Add to our tracking list to avoid duplicates
+                        else:
+                            # Use DID if handle is not available
+                            account_identifier = account['handle'] if account['handle'] else account['did']
+                            logger.error(f"Error adding {account_identifier} to moderation list: {e}")
+                
+                total_added += batch_added
+                logger.info(f"Added {batch_added} accounts in this batch. Total progress: {total_added}/{len(blocked_accounts)}")
+                
+                # Add a small delay between batches to avoid rate limiting
+                if i + batch_size < len(blocked_accounts):
+                    await asyncio.sleep(1)
+            
+            logger.info(f"Finished updating moderation list. Total accounts added: {total_added}")
         except Exception as e:
             logger.error(f"Error updating moderation list: {e}")
             return
