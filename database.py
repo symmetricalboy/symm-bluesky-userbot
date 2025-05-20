@@ -41,9 +41,13 @@ def get_connection():
         raise
 
 class Database:
+    def get_connection(self):
+        """Get a database connection using the global connection function."""
+        return get_connection()
+    
     def register_account(self, handle, did, is_primary=False):
         """Register a managed account in the database."""
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
         try:
             # Check if account already exists
@@ -77,7 +81,7 @@ class Database:
     
     def get_account_by_did(self, did):
         """Get account details by DID."""
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute("SELECT * FROM accounts WHERE did = %s", (did,))
@@ -91,7 +95,7 @@ class Database:
     
     def get_primary_account(self):
         """Get the primary account."""
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute("SELECT * FROM accounts WHERE is_primary = TRUE LIMIT 1")
@@ -105,7 +109,7 @@ class Database:
     
     def add_blocked_account(self, did, handle, source_account_id, block_type, reason=None):
         """Add or update a blocked account in the database. Reset is_synced to FALSE on update if it's a non-primary block."""
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT is_primary FROM accounts WHERE id = %s", (source_account_id,))
@@ -156,30 +160,46 @@ class Database:
     
     def get_unsynced_blocks_for_primary(self, primary_account_id):
         """Get DIDs that were blocked by other managed accounts and need to be synced by the primary account."""
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
-            # Select block entries from non-primary accounts that are marked as 'blocking' 
-            # and are not yet synced (is_synced = FALSE).
-            # Also, ensure the primary account isn't already blocking this DID.
+            # Modified query that finds all blocks from non-primary accounts that should be synced
+            # We want all blocks from secondary accounts where:
+            # 1. The account is not the primary account
+            # 2. The block type is 'blocking'
+            # 3. This specific block entry hasn't been marked as synced
+            # 4. We are NOT checking if primary already blocks this DID - we want to log that too
             query = """
-            SELECT ba.id, ba.did
+            SELECT ba.id, ba.did, ba.handle, 
+                   EXISTS (
+                       SELECT 1
+                       FROM blocked_accounts primary_blocks
+                       WHERE primary_blocks.did = ba.did
+                         AND primary_blocks.source_account_id = %s
+                         AND primary_blocks.block_type = 'blocking'
+                   ) as already_blocked_by_primary
             FROM blocked_accounts ba
             JOIN accounts a ON ba.source_account_id = a.id
             WHERE a.is_primary = FALSE                    -- Block is from a non-primary account
               AND ba.block_type = 'blocking'              -- It's a block action by that non-primary account
-              AND ba.is_synced = FALSE                  -- The primary account hasn't processed this specific entry yet
-              AND NOT EXISTS (                          -- And the primary account is not already blocking this DID
-                  SELECT 1
-                  FROM blocked_accounts primary_blocks
-                  WHERE primary_blocks.did = ba.did
-                    AND primary_blocks.source_account_id = %s
-                    AND primary_blocks.block_type = 'blocking'
-              )
+              AND ba.is_synced = FALSE                    -- The primary account hasn't processed this specific entry yet
             ORDER BY ba.first_seen ASC; -- Process older blocks first
             """
             cursor.execute(query, (primary_account_id,))
-            return cursor.fetchall()
+            results = cursor.fetchall()
+            
+            # Log detailed info about what's being synced
+            if results:
+                for r in results:
+                    if r['already_blocked_by_primary']:
+                        logger.info(f"Found block for {r['handle']} ({r['did']}) that is already blocked by primary - will mark as synced")
+                    else:
+                        logger.info(f"Found block for {r['handle']} ({r['did']}) that needs to be blocked by primary")
+            else:
+                logger.info(f"No blocks from secondary accounts that need syncing")
+                
+            # Return only the ones not already blocked by primary
+            return [r for r in results if not r['already_blocked_by_primary']]
         except Exception as e:
             logger.error(f"Error getting unsynced blocks for primary {primary_account_id}: {e}")
             raise
@@ -191,7 +211,7 @@ class Database:
         """Mark an original block (from a non-primary account) as synced by the primary account.
            This sets the is_synced flag on the original block_accounts record to TRUE.
         """
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
         try:
             # We also need to ensure that the primary account has indeed now blocked this DID.
@@ -217,7 +237,7 @@ class Database:
            'blocking' record by a non-primary account marked as is_synced = FALSE.
            This method is more for general reporting or if other types of sync processes need it.
         """
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
             if unsynced_only:
@@ -256,7 +276,7 @@ class Database:
         if not dids:
             return
             
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
         try:
             placeholders = ", ".join(["%s"] * len(dids))
@@ -283,7 +303,7 @@ class Database:
     
     def register_mod_list(self, list_uri, list_cid, owner_did, name):
         """Register or update a moderation list."""
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
         try:
             # Check if list already exists
@@ -317,7 +337,7 @@ class Database:
             
     def remove_stale_blocks(self, source_account_id, block_type, current_dids):
         """Remove blocks from the database that are no longer present in the current_dids list for a specific account and block_type."""
-        conn = get_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
         try:
             if not current_dids: # If current_dids is empty, delete all for this source/type

@@ -5,6 +5,8 @@ import httpx
 from atproto import Client, FirehoseSubscribeReposClient, models
 from database import Database
 import time # Added for rate limiting delay
+import psycopg2
+import psycopg2.extras
 
 # Set up logging
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -33,6 +35,7 @@ class AccountAgent:
         self.firehose_monitor_task = None
         # Increased timeout for HTTP client
         self.http_client = httpx.AsyncClient(timeout=60.0)
+        self.mod_list_uri = None
         
     async def login(self):
         """Login to the Bluesky account and register in the database."""
@@ -59,6 +62,14 @@ class AccountAgent:
             )
             
             logger.info(f"Account {self.handle} registered with ID {self.account_id}")
+            
+            # If this is primary account, create the moderation list
+            if self.is_primary:
+                try:
+                    await self.create_or_update_moderation_list()
+                except Exception as e:
+                    logger.error(f"Failed to create moderation list for primary account {self.handle}: {e}")
+                
             return True
             
         except Exception as e:
@@ -66,6 +77,82 @@ class AccountAgent:
             if "Unexpected server response" in str(e) or "Handshake failed" in str(e):
                 logger.error("This might be a network issue or Bluesky server problem. Check connection and server status.")
             return False
+    
+    async def create_or_update_moderation_list(self):
+        """Create or update a moderation list for the primary account."""
+        if not self.is_primary:
+            logger.debug(f"Account {self.handle} is not primary, skipping moderation list creation.")
+            return None
+        
+        list_name = os.getenv('MOD_LIST_NAME', 'Synchronized Blocks')
+        list_purpose = os.getenv('MOD_LIST_PURPOSE', 'Automatically synchronized blocks across multiple accounts')
+        list_description = os.getenv('MOD_LIST_DESCRIPTION', 'This list contains accounts that are blocked by or blocking any of our managed accounts')
+        
+        try:
+            logger.info(f"Creating or updating moderation list for primary account {self.handle}...")
+            
+            # Create the moderation list record
+            list_record = models.AppBskyGraphList(
+                purpose="app.bsky.graph.defs#modlist",
+                name=list_name,
+                description=list_description,
+                created_at=self.client.get_current_time_iso()
+            )
+            
+            # First try to get existing lists to see if we already have one
+            try:
+                lists_response = self.client.app.bsky.graph.get_lists()
+                existing_lists = lists_response.lists
+                existing_list = None
+                
+                for lst in existing_lists:
+                    if lst.name == list_name and lst.purpose == "app.bsky.graph.defs#modlist":
+                        existing_list = lst
+                        logger.info(f"Found existing moderation list: {lst.uri}")
+                        break
+            except Exception as e:
+                logger.warning(f"Could not fetch existing lists: {e}")
+                existing_list = None
+            
+            if existing_list:
+                # Update existing list
+                response = self.client.com.atproto.repo.put_record(
+                    repo=self.did,
+                    collection=models.ids.AppBskyGraphList,
+                    rkey=existing_list.uri.split('/')[-1],
+                    record=list_record
+                )
+                list_uri = existing_list.uri
+                list_cid = response.cid
+                logger.info(f"Updated existing moderation list: {list_uri}")
+            else:
+                # Create new list
+                response = self.client.com.atproto.repo.create_record(
+                    repo=self.did,
+                    collection=models.ids.AppBskyGraphList,
+                    record=list_record
+                )
+                list_uri = response.uri
+                list_cid = response.cid
+                logger.info(f"Created new moderation list: {list_uri}")
+            
+            # Store the list URI for later reference
+            self.mod_list_uri = list_uri
+            
+            # Register the list in our database
+            self.database.register_mod_list(
+                list_uri=list_uri,
+                list_cid=list_cid,
+                owner_did=self.did,
+                name=list_name
+            )
+            
+            logger.info(f"Moderation list registered: {list_uri}")
+            return list_uri
+            
+        except Exception as e:
+            logger.error(f"Error creating/updating moderation list for {self.handle}: {e}")
+            return None
     
     async def _fetch_paginated_clearsky_list(self, endpoint_template: str):
         """Helper to fetch all DIDs from a paginated ClearSky endpoint."""
@@ -199,12 +286,13 @@ class AccountAgent:
             cursor = None
             while True:
                 try:
+                    # Create params dictionary correctly
                     params = {'limit': 100}
                     if cursor:
                         params['cursor'] = cursor
                     
-                    # The actor parameter is the DID of the user whose blocks are being fetched.
-                    response = self.client.app.bsky.graph.get_blocks(actor=self.did, params=params)
+                    # Correct way to call get_blocks - actor goes as a regular param, not in params dict
+                    response = self.client.app.bsky.graph.get_blocks(params=params)
                     
                     if not response.blocks:
                         break
@@ -214,13 +302,10 @@ class AccountAgent:
                     cursor = response.cursor
                 except Exception as api_error:
                     logger.error(f"API error in get_blocks for {self.handle}: {api_error}. Trying alternative.")
-                    # Alternative attempt, sometimes the SDK has different expectations
+                    # Alternative attempt with different API approach
                     try:
-                        alt_params = {'limit': 100}
-                        if cursor:
-                           alt_params['cursor'] = cursor
-                        # Pass actor directly if params argument is not recognized by this SDK version for this call
-                        response = self.client.app.bsky.graph.get_blocks(actor=self.did, cursor=cursor, limit=100)
+                        # Try a different approach without specifying actor
+                        response = self.client.app.bsky.graph.get_blocks(limit=100, cursor=cursor)
 
                         if not response.blocks: break
                         blocking.extend(response.blocks)
@@ -228,7 +313,7 @@ class AccountAgent:
                         cursor = response.cursor
                     except Exception as alt_error:
                         logger.error(f"Alternative get_blocks approach also failed for {self.handle}: {alt_error}")
-                        break 
+                        break
             
             logger.info(f"Found {len(blocking)} accounts being blocked by {self.handle} via Bluesky API.")
             
@@ -285,6 +370,46 @@ class AccountAgent:
             # Get all DIDs that other managed accounts are blocking but are not yet synced by this primary account
             accounts_to_block_info = self.database.get_unsynced_blocks_for_primary(self.account_id)
             
+            # Also mark any blocks already being blocked by the primary account as synced
+            already_blocked_dids = []
+            try:
+                # Get all blocks from non-primary accounts that need syncing including those already blocked
+                conn = self.database.get_connection()
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                query = """
+                SELECT ba.id, ba.did, ba.handle, 
+                       EXISTS (
+                           SELECT 1
+                           FROM blocked_accounts primary_blocks
+                           WHERE primary_blocks.did = ba.did
+                             AND primary_blocks.source_account_id = %s
+                             AND primary_blocks.block_type = 'blocking'
+                       ) as already_blocked_by_primary
+                FROM blocked_accounts ba
+                JOIN accounts a ON ba.source_account_id = a.id
+                WHERE a.is_primary = FALSE                    
+                  AND ba.block_type = 'blocking'              
+                  AND ba.is_synced = FALSE                    
+                """
+                cursor.execute(query, (self.account_id,))
+                all_pending_blocks = cursor.fetchall()
+                
+                # Process those already blocked
+                for block in all_pending_blocks:
+                    if block['already_blocked_by_primary']:
+                        already_blocked_dids.append(block['did'])
+                        self.database.mark_block_as_synced_by_primary(block['id'], self.account_id)
+                        logger.info(f"Marked block for {block['handle']} ({block['did']}) as synced - already blocked by primary")
+                
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                logger.error(f"Error processing already blocked DIDs: {e}")
+            
+            # Add the blocks to the moderation list if we have one and there are new blocks
+            if self.mod_list_uri and (accounts_to_block_info or already_blocked_dids):
+                await self.update_moderation_list_items()
+            
             if not accounts_to_block_info:
                 logger.info(f"No new accounts to sync for primary account {self.handle}.")
                 return
@@ -330,6 +455,7 @@ class AccountAgent:
                         elif "already exists" in str(e).lower() or "duplicate record" in str(e).lower():
                             logger.info(f"Block for {blocked_did_to_sync} already exists for {self.handle}. Marking as synced.")
                             self.database.mark_block_as_synced_by_primary(original_block_db_id, self.account_id)
+                            successfully_blocked_dids_in_session.append(blocked_did_to_sync)
                         else:
                             logger.error(f"Error creating block record for {blocked_did_to_sync} by {self.handle}: {e}")
                 
@@ -339,6 +465,10 @@ class AccountAgent:
 
             if successfully_blocked_dids_in_session:
                 logger.info(f"Primary account {self.handle} successfully blocked {len(successfully_blocked_dids_in_session)} new DIDs in this session.")
+                
+                # Update the moderation list with the new blocks
+                if self.mod_list_uri:
+                    await self.update_moderation_list_items()
             
         except Exception as e:
             # This is the outer catch block where the user's log showed the Pydantic error
@@ -347,7 +477,64 @@ class AccountAgent:
                  logger.critical(f"CRITICAL HIT IN OUTER EXCEPTION: Pydantic Validation Error in sync_blocks_from_others for {self.handle}: {e}")
         
         logger.info(f"Sync of blocks from others completed for primary account {self.handle}.")
-
+        
+    async def update_moderation_list_items(self):
+        """Update the moderation list with all blocked accounts."""
+        if not self.is_primary or not self.mod_list_uri:
+            return
+            
+        try:
+            logger.info(f"Updating moderation list items for {self.handle}...")
+            
+            # Get all accounts that are blocked by any managed account
+            blocked_accounts = self.database.get_all_blocked_accounts()
+            
+            if not blocked_accounts:
+                logger.info("No blocked accounts to add to moderation list")
+                return
+                
+            logger.info(f"Adding {len(blocked_accounts)} accounts to moderation list")
+            
+            # Get the current list items
+            try:
+                current_items = self.client.app.bsky.graph.get_list_items(list=self.mod_list_uri).items
+                current_item_subjects = [item.subject.did for item in current_items]
+                logger.info(f"Found {len(current_items)} existing items in moderation list")
+            except Exception as e:
+                logger.warning(f"Could not fetch current list items: {e}")
+                current_item_subjects = []
+            
+            # Add all blocked accounts to the list
+            for account in blocked_accounts:
+                # Skip if this DID is already in the list
+                if account['did'] in current_item_subjects:
+                    continue
+                    
+                try:
+                    # Add the account to the moderation list
+                    item_record = models.AppBskyGraphListitem(
+                        subject=account['did'],
+                        list=self.mod_list_uri,
+                        created_at=self.client.get_current_time_iso()
+                    )
+                    
+                    response = self.client.com.atproto.repo.create_record(
+                        repo=self.did,
+                        collection=models.ids.AppBskyGraphListitem,
+                        record=item_record
+                    )
+                    
+                    logger.info(f"Added {account['handle'] or account['did']} to moderation list")
+                except Exception as e:
+                    if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+                        logger.info(f"Account {account['handle'] or account['did']} already in list - skipping")
+                    else:
+                        logger.error(f"Error adding {account['handle'] or account['did']} to moderation list: {e}")
+            
+            logger.info(f"Finished updating moderation list")
+        except Exception as e:
+            logger.error(f"Error updating moderation list: {e}")
+            return
     
     async def sync_all_account_data(self):
         """Fetch all relevant data for this account (blocks, blocked by, etc.)."""
