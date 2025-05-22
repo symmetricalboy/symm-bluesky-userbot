@@ -1,0 +1,99 @@
+{
+  "timestamp": "2025-05-22T17:01:37.758172",
+  "summary": {
+    "total_checks": 5,
+    "passed": 5,
+    "warned": 0,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "name": "Environment Variables",
+      "status": "pass",
+      "message": "All environment variables are properly configured",
+      "details": {
+        "required_vars_count": 6,
+        "missing_required_count": 0,
+        "optional_vars_count": 5,
+        "missing_optional_count": 0,
+        "present_vars": {
+          "PRIMARY_BLUESKY_HANDLE": "symm.social",
+          "PRIMARY_BLUESKY_PASSWORD": "***MASKED***",
+          "DB_HOST": "${{Postgres.PGHOST}}",
+          "DB_NAME": "${{Postgres.PGDATABASE}}",
+          "DB_USER": "${{Postgres.PGUSER}}",
+          "DB_PASSWORD": "***MASKED***",
+          "SECONDARY_ACCOUNTS": "symm.app,cexo-zm7q-jkuq-xzwl;symm.now,aydi-zf7w-dr...",
+          "CLEARSKY_API_URL": "https://api.clearsky.services/api/v1/anon",
+          "LOG_LEVEL": "INFO",
+          "MOD_LIST_NAME": "symmetrical blocks",
+          "MOD_LIST_DESCRIPTION": "This list contains accounts that are blocked by or..."
+        }
+      },
+      "duration": 2.574920654296875e-05,
+      "recommendations": [],
+      "timestamp": "2025-05-22T17:01:33.485672"
+    },
+    {
+      "name": "System Resources",
+      "status": "pass",
+      "message": "System resources are healthy",
+      "details": {
+        "cpu_usage_percent": 44.2,
+        "memory_total_gb": 31.59573745727539,
+        "memory_available_gb": 12.483280181884766,
+        "memory_usage_percent": 60.5,
+        "disk_total_gb": 1906.22216796875,
+        "disk_free_gb": 1335.6338424682617,
+        "disk_usage_percent": 29.9,
+        "system_uptime_hours": 86.60944464445114
+      },
+      "duration": 1.0358822345733643,
+      "recommendations": [],
+      "timestamp": "2025-05-22T17:01:34.525135"
+    },
+    {
+      "name": "Database Connectivity",
+      "status": "pass",
+      "message": "Database connection and schema OK",
+      "details": {
+        "existing_tables": 6,
+        "required_tables": 3,
+        "missing_tables": []
+      },
+      "duration": 0.5716800689697266,
+      "recommendations": [],
+      "timestamp": "2025-05-22T17:01:35.233171"
+    },
+    {
+      "name": "ClearSky API",
+      "status": "pass",
+      "message": "ClearSky API is accessible and responding",
+      "details": {
+        "status_code": 200,
+        "response_time_ms": 1452.7175426483154,
+        "api_url": "https://api.clearsky.services/api/v1/anon",
+        "response_valid": true,
+        "response_size_bytes": 2379
+      },
+      "duration": 1.4527175426483154,
+      "recommendations": [],
+      "timestamp": "2025-05-22T17:01:36.694476"
+    },
+    {
+      "name": "Account Authentication",
+      "status": "pass",
+      "message": "Account authentication successful",
+      "details": {
+        "primary_handle": "symm.social",
+        "primary_did": "did:plc:33d7gnwiagm6cimpiepefp72",
+        "auth_time_ms": 1044.947624206543,
+        "secondary_accounts_configured": 4,
+        "secondary_accounts_format_valid": true
+      },
+      "duration": 1.044947624206543,
+      "recommendations": [],
+      "timestamp": "2025-05-22T17:01:37.751881"
+    }
+  ]
+}
