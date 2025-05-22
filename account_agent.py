@@ -4,7 +4,7 @@ import logging
 import httpx
 import json
 from atproto import AsyncClient as ATProtoAsyncClient
-from atproto import AsyncFirehoseSubscribeReposClient
+from atproto_firehose import AsyncFirehoseSubscribeReposClient
 from atproto_firehose.models import MessageFrame
 from atproto_client.client.session import Session
 from atproto_client.models.app.bsky.graph.list import Record as ListRecord
