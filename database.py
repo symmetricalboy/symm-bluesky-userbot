@@ -232,17 +232,17 @@ class Database:
         """Execute the account registration logic"""
         async with connection_pool.acquire() as conn:
             async with conn.transaction():
-                # Check if account already exists
+                # Check if account already exists by DID or handle
                 account_id = await conn.fetchval(
-                    "SELECT id FROM accounts WHERE did = $1",
-                    did
+                    "SELECT id FROM accounts WHERE did = $1 OR handle = $2",
+                    did, handle
                 )
                 
                 if account_id:
                     # Update existing account
                     await conn.execute(
-                        "UPDATE accounts SET handle = $1, is_primary = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3",
-                        handle, is_primary, account_id
+                        "UPDATE accounts SET handle = $1, did = $2, is_primary = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4",
+                        handle, did, is_primary, account_id
                     )
                     contextual_logger.debug(f"Updated existing account with ID: {account_id}")
                 else:
