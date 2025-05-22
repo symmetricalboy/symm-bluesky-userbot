@@ -329,13 +329,14 @@ class AccountAgent:
 
         firehose_client = None # Initialize to ensure it's in scope for finally block
         try:
+            logger.info(f"DEBUG_PROBE: sync_blocks_with_firehose - About to initialize AsyncFirehoseSubscribeReposClient for {self.handle}") # ADDED DEBUG PROBE
             logger.info(f"FIREHOSE_SYNC ({self.did}): Initializing AsyncFirehoseSubscribeReposClient. Host: {FIREHOSE_HOST}, Cursor: {cursor_val}")
             firehose_client = AsyncFirehoseSubscribeReposClient(
                 cursor=cursor_val,
                 host=FIREHOSE_HOST
             )
             logger.info(f"FIREHOSE_SYNC ({self.did}): Firehose client initialized. Attempting to connect and start listening...")
-            
+            logger.info(f"DEBUG_PROBE: sync_blocks_with_firehose - About to call firehose_client.start() for {self.handle}") # ADDED DEBUG PROBE
             # The start method blocks until an error or graceful stop
             await firehose_client.start(self._firehose_message_handler)
             
@@ -550,7 +551,8 @@ class AccountAgent:
         return blocked_by_dids
 
     async def fetch_bluesky_blocks(self):
-        logger.info(f"DEBUG_PROBE: fetch_bluesky_blocks called for {self.handle}") # ADDED DEBUG PROBE
+        logger.info(f"DEBUG_PROBE_FETCH_ENTRY: fetch_bluesky_blocks ENTERED for {self.handle}") # MODIFIED DEBUG PROBE
+        logger.info(f"DEBUG_PROBE: fetch_bluesky_blocks called for {self.handle}") 
         logger.info(f"BLUESKY_API_SYNC ({self.handle}): Fetching accounts this account is blocking (for initial sync)...")
         blocked_accounts_dids = []
         cursor = None
