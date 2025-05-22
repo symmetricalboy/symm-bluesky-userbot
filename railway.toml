@@ -2,8 +2,8 @@
 # Railway automatically detects Python projects
 
 [deploy]
-# Start command for the main application
-startCommand = "python main.py --production"
+# Start command for the main application (runs in production mode by default)
+startCommand = "python main.py"
 # Alternative start commands for different modes:
 # python main.py --test (for testing)
 # python main.py --interactive (for interactive diagnostics)
