@@ -1,19 +1,42 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import logging
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Database connection string
-DB_CONNECTION_STRING = "postgresql://postgres:rTMEPuxoslcypaFduvhdkABJLVGHhhQi@metro.proxy.rlwy.net:22580/railway"
-
 def get_connection():
-    """Get a connection to the database using the direct connection string."""
+    """Get a connection to the database, supporting both individual params and DATABASE_URL."""
     try:
-        logger.info("Connecting to database...")
-        return psycopg2.connect(DB_CONNECTION_STRING)
+        # First check for Railway-style DATABASE_URL
+        database_url = os.getenv('DATABASE_URL')
+        
+        if database_url:
+            logger.info(f"Connecting using DATABASE_URL: {database_url}")
+            return psycopg2.connect(database_url)
+        else:
+            # Fall back to individual connection parameters
+            DB_HOST = os.getenv('DB_HOST', 'localhost')
+            DB_PORT = os.getenv('DB_PORT', '5432')
+            DB_NAME = os.getenv('DB_NAME', 'symm_blocks')
+            DB_USER = os.getenv('DB_USER', 'postgres')
+            DB_PASSWORD = os.getenv('DB_PASSWORD', '')
+            
+            connection_string = f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} user={DB_USER} password={DB_PASSWORD}"
+            logger.info(f"Connecting using individual parameters: host={DB_HOST}, port={DB_PORT}, dbname={DB_NAME}, user={DB_USER}")
+            return psycopg2.connect(
+                host=DB_HOST,
+                port=DB_PORT,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                dbname=DB_NAME
+            )
     except Exception as e:
         logger.error(f"Database connection error: {e}")
         raise
@@ -212,7 +235,22 @@ def run_diagnostics():
     logger.info("Starting database diagnostics...")
     
     logger.info("\n=== CHECKING DATABASE TABLES ===")
-    check_tables()
+    tables = check_tables()
+    
+    # If there are no tables, try to initialize the database
+    if not tables:
+        logger.warning("No tables found in the database. Attempting to initialize tables...")
+        try:
+            import setup_db
+            setup_db.setup_database()
+            logger.info("Database initialization completed. Checking tables again...")
+            tables = check_tables()
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+    
+    if not tables:
+        logger.error("Still no tables found after initialization attempt. Exiting.")
+        return
     
     logger.info("\n=== CHECKING ACCOUNTS TABLE STRUCTURE ===")
     check_columns('accounts')

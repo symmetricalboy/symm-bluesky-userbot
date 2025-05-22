@@ -396,43 +396,41 @@ async def main():
     # Normal operation mode
     logger.info("Starting Bluesky account agent...")
 
-    # Run diagnostics and tests first, unless explicitly skipped
+    # Attempt to set up the database
+    logger.info("Attempting to initialize/verify database schema...")
+    try:
+        setup_database() # Attempt to create/update tables
+        logger.info("Database setup/update function executed.")
+        if not is_database_setup(): # Verify setup
+            logger.critical("Database schema verification failed after setup attempt. Please check logs. Exiting.")
+            return False # Indicate failure
+        else:
+            logger.info("Database schema successfully initialized/verified.")
+    except Exception as e:
+        logger.critical(f"A critical error occurred during database setup: {e}. Please check database configuration and logs. Exiting.")
+        return False # Indicate failure
+
+    # Run diagnostics and tests, unless explicitly skipped
     if not args.skip_diagnostics:
         try:
-            logger.info("Running diagnostics and tests before starting main application...")
+            logger.info("Running diagnostics and tests...")
             # Run database diagnostics
-            await run_diagnostics()
+            await run_diagnostics() # This should now run on a presumably set-up DB
             
-            # Run test block sync (optional - only if DB is set up)
-            if is_database_setup():
+            # Run test block sync.
+            # Given the critical exit above if DB setup fails, is_database_setup() should be true here.
+            if is_database_setup(): 
                 await run_test_block_sync()
             else:
-                logger.warning("Skipping test block sync because database is not set up")
+                # This path indicates a severe inconsistency.
+                logger.error("CRITICAL: Database reported as not set up AFTER successful setup and verification. " +
+                             "Skipping test block sync. System may be unstable.")
         except Exception as e:
             logger.error(f"Error during diagnostics/tests: {e}")
-            logger.info("Continuing with main application despite diagnostic errors")
+            logger.warning("Continuing with main application despite diagnostic/test errors. Check logs for details.")
     else:
-        logger.info("Skipping diagnostics and tests (--skip-diagnostics flag used)")
+        logger.info("Skipping diagnostics and tests (--skip-diagnostics flag used).")
 
-    # Check and set up database
-    logger.info("Checking database setup...")
-    if not is_database_setup():
-        logger.warning("Database is not set up correctly. Attempting to run setup...")
-        try:
-            setup_database()  # Call the imported setup function
-            logger.info("Database setup function executed.")
-            # Re-check database setup
-            if not is_database_setup():
-                logger.critical("Database setup failed after attempt. Please check database configuration and logs. Exiting.")
-                return False # Indicate failure
-            else:
-                logger.info("Database is now correctly set up.")
-        except Exception as e:
-            logger.critical(f"An error occurred during database setup: {e}. Please check database configuration and logs. Exiting.")
-            return False # Indicate failure
-    else:
-        logger.info("Database is correctly set up.")
-    
     # Initialize database object (used by agents)
     database = Database()
     
