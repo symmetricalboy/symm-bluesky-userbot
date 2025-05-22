@@ -4,6 +4,7 @@ import logging
 import httpx
 from atproto import AsyncClient as ATProtoAsyncClient
 from atproto import AsyncFirehoseSubscribeReposClient
+from atproto_firehose.models import MessageFrame
 from atproto_client.models.app.bsky.graph.list import Record as ListRecord
 from atproto_client.models.app.bsky.graph.listitem import Record as ListItemRecord
 from atproto_client.models.app.bsky.graph.block import Record as BlockRecord
@@ -12,14 +13,6 @@ from atproto_client.models.app.bsky.graph.get_list import Params as GetListParam
 from atproto_client.models.com.atproto.repo.put_record import Data as PutRecordData
 from atproto_client.models.com.atproto.repo.create_record import Data as CreateRecordData
 from atproto_client.models.com.atproto.sync.subscribe_repos import Commit as FirehoseCommitModel
-
-# Fix MessageFrame import
-try:
-    from atproto import MessageFrame
-except ImportError:
-    # If MessageFrame is not available, define a placeholder
-    class MessageFrame:
-        pass
 
 from atproto_core.car import CAR
 import cbor2
@@ -81,7 +74,7 @@ class AccountAgent:
             self.did = profile.did
             logger.info(f"Logged in as {self.handle} (DID: {self.did})")
 
-            self.account_id = self.database.register_account(
+            self.account_id = await self.database.register_account(
                 self.handle,
                 self.did,
                 is_primary=self.is_primary
@@ -158,7 +151,7 @@ class AccountAgent:
                 logger.info(f"Created new moderation list: {list_uri} (CID: {list_cid})")
             
             self.mod_list_uri = list_uri
-            self.database.register_mod_list(
+            await self.database.register_mod_list(
                 list_uri=list_uri,
                 list_cid=list_cid, 
                 owner_did=self.did,
@@ -177,7 +170,7 @@ class AccountAgent:
 
         logger.info(f"Account {self.handle} (id: {self.account_id}) processing block for {blocked_did}. Reason: {block_reason}")
         try:
-            self.database.add_blocked_account(
+            await self.database.add_blocked_account(
                 did=blocked_did,
                 handle=None, 
                 source_account_id=self.account_id,
@@ -594,7 +587,7 @@ class AccountAgent:
             try:
                 # The add_blocked_account method in database.py should ideally handle "INSERT ... ON CONFLICT DO NOTHING"
                 # or "UPDATE" if some fields might change (though for 'blocked_by' it's usually just presence).
-                self.database.add_blocked_account(
+                await self.database.add_blocked_account(
                     did=did, handle=None, source_account_id=self.account_id, block_type='blocked_by' 
                 )
                 # logger.debug(f"CLEARSKY_SYNC ({self.handle}): Processed 'blocked_by' DID {did} into DB.") # Can be too verbose
@@ -602,7 +595,7 @@ class AccountAgent:
                 logger.error(f"CLEARSKY_SYNC ({self.handle}): Error adding 'blocked_by' DID {did} from ClearSky to DB: {e}", exc_info=True)
         
         logger.debug(f"CLEARSKY_SYNC ({self.handle}): Removing stale 'blocked_by' entries from DB...")
-        self.database.remove_stale_blocks(self.account_id, 'blocked_by', blocked_by_dids)
+        await self.database.remove_stale_blocks(self.account_id, 'blocked_by', blocked_by_dids)
         logger.info(f"CLEARSKY_SYNC ({self.handle}): Finished fetching and processing who is blocking this account.")
         return blocked_by_dids
 
@@ -635,7 +628,7 @@ class AccountAgent:
                     for block_view in response.blocks:
                         blocked_accounts_dids.append(block_view.did)
                         # This add_blocked_account should also be idempotent or handle conflicts
-                        self.database.add_blocked_account(
+                        await self.database.add_blocked_account(
                             did=block_view.did, handle=block_view.handle, 
                             source_account_id=self.account_id, block_type='blocking',
                             reason="Fetched via Bluesky API get_blocks" 
@@ -666,7 +659,7 @@ class AccountAgent:
             logger.warning(f"BLUESKY_API_SYNC ({self.handle}): No blocks found for account {self.handle}. This may be expected if the account has no blocks.")
             
         logger.debug(f"BLUESKY_API_SYNC ({self.handle}): Removing stale 'blocking' entries from DB (initial sync reconciliation)...")
-        self.database.remove_stale_blocks(self.account_id, 'blocking', blocked_accounts_dids) # For initial sync, ensure DB reflects API state
+        await self.database.remove_stale_blocks(self.account_id, 'blocking', blocked_accounts_dids) # For initial sync, ensure DB reflects API state
         logger.info(f"BLUESKY_API_SYNC ({self.handle}): Finished fetching and processing blocks from Bluesky API.")
         return blocked_accounts_dids
 
@@ -679,7 +672,7 @@ class AccountAgent:
         
         # Add debug logging to see if there are any blocked accounts in the database
         try:
-            blocked_accounts = self.database.get_all_blocked_accounts()
+            blocked_accounts = await self.database.get_all_blocked_accounts()
             logger.info(f"PRIMARY_SYNC ({self.handle}): Database contains {len(blocked_accounts)} total blocked accounts records (including all accounts and types)")
             
             # Log sample of block records for debugging
@@ -696,7 +689,7 @@ class AccountAgent:
             logger.info(f"PRIMARY_SYNC ({self.handle}): Database contains {len(unique_dids)} unique DIDs being blocked by all accounts")
             
             # List secondary accounts for debugging
-            secondary_accounts = self.database.get_secondary_accounts()
+            secondary_accounts = await self.database.get_secondary_accounts()
             if secondary_accounts:
                 logger.info(f"PRIMARY_SYNC ({self.handle}): Found {len(secondary_accounts)} secondary accounts in database")
                 for acct in secondary_accounts:
@@ -707,7 +700,7 @@ class AccountAgent:
             logger.error(f"PRIMARY_SYNC ({self.handle}): Error getting debug info: {e}", exc_info=True)
         
         # Continue with normal sync logic
-        unsynced_entries = self.database.get_unsynced_blocks_for_primary(self.account_id)
+        unsynced_entries = await self.database.get_unsynced_blocks_for_primary(self.account_id)
         
         if not unsynced_entries:
             logger.info(f"PRIMARY_SYNC ({self.handle}): No new unsynced blocks from other accounts to process.")
@@ -718,14 +711,14 @@ class AccountAgent:
         for entry_idx, entry in enumerate(unsynced_entries):
             did_to_block = entry['did']
             original_block_db_id = entry['id'] 
-            already_blocked_by_primary_in_db = entry['already_blocked_by_primary']
+            already_blocked_by_primary = entry.get('already_blocked_by_primary', False)
             source_secondary_handle = entry.get('source_account_handle', 'Unknown Secondary') # Assuming DB query provides this
 
-            logger.info(f"PRIMARY_SYNC ({self.handle}): Processing entry {entry_idx+1}/{len(unsynced_entries)}. DID: {did_to_block}, From: {source_secondary_handle} (DB ID: {original_block_db_id}). Already blocked in DB by primary: {already_blocked_by_primary_in_db}")
+            logger.info(f"PRIMARY_SYNC ({self.handle}): Processing entry {entry_idx+1}/{len(unsynced_entries)}. DID: {did_to_block}, From: {source_secondary_handle} (DB ID: {original_block_db_id}). Already blocked in DB by primary: {already_blocked_by_primary}")
 
             try:
                 # Step 1: Ensure primary account blocks the DID on Bluesky if not already in DB as primary's block
-                if not already_blocked_by_primary_in_db:
+                if not already_blocked_by_primary:
                     logger.info(f"PRIMARY_SYNC ({self.handle}): Attempting to create Bluesky block for {did_to_block} (as it's not in DB as primary's block).")
                     try:
                         block_record_data = BlockRecord(subject=did_to_block, created_at=self.client.get_current_time_iso())
@@ -737,7 +730,7 @@ class AccountAgent:
                         await self.client.com.atproto.repo.create_record(data=data)
                         logger.info(f"PRIMARY_SYNC ({self.handle}): Successfully created Bluesky block for {did_to_block}.")
                         # Now, add this action to our DB for the primary account
-                        self.database.add_blocked_account(
+                        await self.database.add_blocked_account(
                             did=did_to_block, handle=entry.get('handle'), # Use handle from original block if available
                             source_account_id=self.account_id, block_type='blocking',
                             reason=f"Synced from {source_secondary_handle}'s block (db_id:{original_block_db_id})"
@@ -747,7 +740,7 @@ class AccountAgent:
                         if "Conflict" in str(e_block_create) or "Record already exists" in str(e_block_create):
                             logger.info(f"PRIMARY_SYNC ({self.handle}): Bluesky block for {did_to_block} already exists (Conflict). Assuming it's blocked. Adding to DB if missing.")
                             # Ensure it's in the DB as a primary block if the API says it exists
-                            self.database.add_blocked_account(
+                            await self.database.add_blocked_account(
                                 did=did_to_block, handle=entry.get('handle'),
                                 source_account_id=self.account_id, block_type='blocking',
                                 reason=f"Synced from {source_secondary_handle} (API conflict indicated pre-existing)"
@@ -780,7 +773,7 @@ class AccountAgent:
                         # Continue even if list add fails, block is more critical
                 
                 # Step 3: Mark original secondary block as synced by primary
-                self.database.mark_block_as_synced_by_primary(original_block_db_id, self.account_id)
+                await self.database.mark_block_as_synced_by_primary(original_block_db_id, self.account_id)
                 logger.info(f"PRIMARY_SYNC ({self.handle}): Marked original block (DB ID: {original_block_db_id}, DID: {did_to_block}) from {source_secondary_handle} as synced by primary.")
             
             except Exception as e_outer: # Catch-all for the entry processing
@@ -796,7 +789,7 @@ class AccountAgent:
 
         logger.info(f"MOD_LIST_SYNC ({self.handle}): Performing full sync of moderation list {self.mod_list_uri} based on DB state...")
         try:
-            all_intended_dids_on_list_records = self.database.get_all_dids_primary_should_list(self.account_id)
+            all_intended_dids_on_list_records = await self.database.get_all_dids_primary_should_list(self.account_id)
             intended_dids_on_list = {record['did'] for record in all_intended_dids_on_list_records}
             logger.info(f"MOD_LIST_SYNC ({self.handle}): DB indicates {len(intended_dids_on_list)} DIDs should be on the moderation list.")
         except Exception as e:
@@ -954,7 +947,7 @@ class AccountAgent:
                         
                         try:
                             # Add to database
-                            self.database.add_blocked_account(
+                            await self.database.add_blocked_account(
                                 did=did, 
                                 handle=None,  # Handle can be resolved later if needed
                                 source_account_id=self.account_id, 
@@ -965,7 +958,7 @@ class AccountAgent:
                     
                     # Remove stale entries
                     logger.info(f"BLOCKS_MONITOR ({self.handle}): Removing stale blocked-by entries from DB...")
-                    self.database.remove_stale_blocks(self.account_id, 'blocked_by', list(processed_dids))
+                    await self.database.remove_stale_blocks(self.account_id, 'blocked_by', list(processed_dids))
                     
                     elapsed_time = time.time() - start_time
                     logger.info(f"BLOCKS_MONITOR ({self.handle}): Processed {len(processed_dids)} unique blocked-by DIDs in {elapsed_time:.2f} seconds")

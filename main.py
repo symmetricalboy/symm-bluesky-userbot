@@ -10,7 +10,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from account_agent import AccountAgent, CLEARSKY_API_BASE_URL
 from setup_db import setup_database
-from database import Database, get_connection
+from database import Database, get_connection, release_connection, close_connection_pool
 from test_mod_list_sync import sync_mod_list_from_db
 import clearsky_helpers as cs
 
@@ -46,59 +46,68 @@ IS_PRIMARY = {
     "did:plc:kkylvufgv5shv2kpd74lca6o": False,  # symm.now
 }
 
-def is_database_setup():
+async def is_database_setup():
     """Check if the database exists and is properly configured."""
     try:
-        # Use the Database class's get_connection method to respect LOCAL_TEST
-        conn = get_connection()
-        cursor = conn.cursor()
+        # Use the Database class directly for async operation
+        db = Database()
+        db_connection_ok = await db.test_connection()
+        
+        if not db_connection_ok:
+            logger.warning("Database connection test failed")
+            return False
         
         # Check if required tables exist
         local_test = os.getenv('LOCAL_TEST', 'False').lower() == 'true'
         table_suffix = "_test" if local_test else ""
         
         required_tables = [f'accounts{table_suffix}', f'blocked_accounts{table_suffix}', f'mod_lists{table_suffix}']
-        cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
-        existing_tables = [row[0] for row in cursor.fetchall()]
+        
+        # Execute a query to check tables
+        query = """
+            SELECT table_name FROM information_schema.tables 
+            WHERE table_schema = 'public'
+        """
+        
+        tables_result = await db.execute_query(query)
+        existing_tables = [row.get('table_name') for row in tables_result]
         
         all_tables_exist = all(table in existing_tables for table in required_tables)
         if not all_tables_exist:
             missing_tables = [table for table in required_tables if table not in existing_tables]
             logger.warning(f"Database check: Missing required tables: {', '.join(missing_tables)}")
-            cursor.close()
-            conn.close()
             return False
 
         # Check for 'updated_at' column in 'accounts' table
-        cursor.execute(f"""
+        column_query = f"""
             SELECT EXISTS (
                 SELECT FROM information_schema.columns 
                 WHERE table_schema = 'public' 
                 AND table_name = 'accounts{table_suffix}' 
                 AND column_name = 'updated_at'
-            )
-        """)
-        updated_at_exists = cursor.fetchone()[0]
+            ) AS exists
+        """
+        updated_at_result = await db.execute_query(column_query)
+        updated_at_exists = updated_at_result[0].get('exists', False) if updated_at_result else False
+        
         if not updated_at_exists:
             logger.warning(f"Database check: 'accounts{table_suffix}' table is missing 'updated_at' column.")
-            cursor.close()
-            conn.close()
             return False
 
         # Check for 'last_firehose_cursor' column in 'accounts' table
-        cursor.execute(f"""
+        cursor_query = f"""
             SELECT EXISTS (
                 SELECT FROM information_schema.columns 
                 WHERE table_schema = 'public' 
                 AND table_name = 'accounts{table_suffix}' 
                 AND column_name = 'last_firehose_cursor'
-            )
-        """)
-        last_firehose_cursor_exists = cursor.fetchone()[0]
+            ) AS exists
+        """
+        cursor_result = await db.execute_query(cursor_query)
+        last_firehose_cursor_exists = cursor_result[0].get('exists', False) if cursor_result else False
+        
         if not last_firehose_cursor_exists:
             logger.warning(f"Database check: 'accounts{table_suffix}' table is missing 'last_firehose_cursor' column.")
-            cursor.close()
-            conn.close()
             return False
             
         # Add checks for other critical columns if necessary, for example:
@@ -107,16 +116,11 @@ def is_database_setup():
         # Check for 'list_uri', 'owner_did' in 'mod_lists'
 
         logger.info("Database check: All required tables and critical columns appear to exist.")
-        cursor.close()
-        conn.close()
         return True
         
-    except psycopg2.OperationalError as e:
-        # This handles cases like database not existing or wrong credentials
-        logger.warning(f"Database check: OperationalError connecting to or querying database. Error: {e}")
-        return False
     except Exception as e:
-        logger.error(f"Database check: An unexpected error occurred: {e}", exc_info=True)
+        # This handles cases like database not existing or wrong credentials
+        logger.warning(f"Database check: Error connecting to or querying database. Error: {e}")
         return False
 
 async def initialize_agents():
@@ -209,14 +213,14 @@ async def initialize_accounts_in_db():
     logger.info("Initializing accounts in the database...")
     
     db = Database()
-    if not db.test_connection():
+    if not await db.test_connection():
         logger.error("Database connection test failed. Cannot initialize accounts.")
         return False
     
     for did, handle in DID_TO_HANDLE.items():
         is_primary = IS_PRIMARY.get(did, False)
         try:
-            account_id = db.register_account(handle, did, is_primary)
+            account_id = await db.register_account(handle, did, is_primary)
             logger.info(f"Registered account {handle} (DID: {did}) as {'PRIMARY' if is_primary else 'secondary'} with ID: {account_id}")
         except Exception as e:
             logger.error(f"Failed to register account {handle} (DID: {did}): {e}")
@@ -301,13 +305,13 @@ async def populate_blocks_from_clearsky():
     
     # Initialize database
     db = Database()
-    if not db.test_connection():
+    if not await db.test_connection():
         logger.error("Database connection test failed. Cannot populate blocks.")
         return False
     
     # Get accounts from database to ensure they exist
-    primary_account = db.get_primary_account()
-    secondary_accounts = db.get_secondary_accounts() or []
+    primary_account = await db.get_primary_account()
+    secondary_accounts = await db.get_secondary_accounts() or []
     
     accounts = []
     if primary_account:
@@ -345,7 +349,7 @@ async def populate_blocks_from_clearsky():
                         blocked_handle = DID_TO_HANDLE.get(blocked_did, "unknown")  # Use known handle if available
                         
                         try:
-                            db.add_blocked_account(
+                            await db.add_blocked_account(
                                 did=blocked_did,
                                 handle=blocked_handle,
                                 source_account_id=account_id,
@@ -389,7 +393,7 @@ async def populate_blocks_from_clearsky():
                     blocker_handle = DID_TO_HANDLE.get(blocker_did, "unknown")  # Use known handle if available
                     
                     try:
-                        db.add_blocked_account(
+                        await db.add_blocked_account(
                             did=blocker_did,
                             handle=blocker_handle,
                             source_account_id=account_id,
@@ -483,7 +487,7 @@ async def run_test_mode():
     
     # Test database connection
     logger.info("Testing database connection...")
-    database_ok = database.test_connection()
+    database_ok = await database.test_connection()
     if database_ok:
         logger.info("Database connection successful")
     else:
@@ -553,7 +557,7 @@ async def run_diagnostics():
     try:
         # Initialize database for queries
         db = Database()
-        if not db.test_connection():
+        if not await db.test_connection():
             logger.error("Database connection test failed. Cannot run diagnostics.")
             return False
         
@@ -575,7 +579,7 @@ async def run_diagnostics():
                 GROUP BY did, block_type, source_account_id
                 HAVING COUNT(*) > 1
             """
-            results = db.execute_query(query)
+            results = await db.execute_query(query)
             
             if results and len(results) > 0:
                 logger.warning(f"Found {len(results)} instances of duplicate DIDs in the database!")
@@ -692,9 +696,9 @@ async def main():
     # Attempt to set up the database
     logger.info("Attempting to initialize/verify database schema...")
     try:
-        setup_database(force_local=False) # Attempt to create/update tables, explicitly specifying NOT to force using test connection
+        await setup_database(force_local=False) # Attempt to create/update tables, explicitly specifying NOT to force using test connection
         logger.info("Database setup/update function executed.")
-        if not is_database_setup(): # Verify setup
+        if not await is_database_setup(): # Verify setup
             logger.critical("Database schema verification failed after setup attempt. Please check logs. Exiting.")
             return False # Indicate failure
         else:
@@ -730,7 +734,7 @@ async def main():
             
             # Run test block sync.
             # Given the critical exit above if DB setup fails, is_database_setup() should be true here.
-            if is_database_setup(): 
+            if await is_database_setup(): 
                 await run_test_block_sync()
             else:
                 # This path indicates a severe inconsistency.
@@ -821,6 +825,12 @@ async def main():
     # Keep the program running
     try:
         logger.info("All account agents started successfully. Running indefinitely.")
+        
+        # Set up a signal handler for graceful shutdown
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_handler(primary_agent, secondary_agents)))
+        
         while True:
             await asyncio.sleep(3600)  # Sleep for an hour between checks
     except KeyboardInterrupt:
@@ -833,8 +843,28 @@ async def main():
         await primary_agent.stop_monitoring()
         for agent in secondary_agents:
             await agent.stop_monitoring()
+        
+        # Close the database connection pool
+        logger.info("Closing database connection pool...")
+        await close_connection_pool()
     
     return True
+
+async def shutdown_handler(primary_agent, secondary_agents):
+    """Handle graceful shutdown of the application."""
+    logger.info("Shutdown signal received, shutting down gracefully...")
+    
+    # Stop all agents
+    await primary_agent.stop_monitoring()
+    for agent in secondary_agents:
+        await agent.stop_monitoring()
+    
+    # Close the database connection pool
+    logger.info("Closing database connection pool...")
+    await close_connection_pool()
+    
+    # Exit the application
+    sys.exit(0)
 
 if __name__ == "__main__":
     success = asyncio.run(main())

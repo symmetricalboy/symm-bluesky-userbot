@@ -24,7 +24,7 @@ async def find_duplicate_dids():
     logger.info("Looking for duplicate DIDs in the database...")
     
     db = Database()
-    if not db.test_connection():
+    if not await db.test_connection():
         logger.error("Database connection test failed. Cannot check for duplicates.")
         return []
     
@@ -38,7 +38,7 @@ async def find_duplicate_dids():
     """
     
     try:
-        results = db.execute_query(query)
+        results = await db.execute_query(query)
         
         if results and len(results) > 0:
             logger.info(f"Found {len(results)} instances of duplicate DIDs")
@@ -61,7 +61,7 @@ async def clean_duplicate_dids(duplicates):
     logger.info(f"Cleaning up {len(duplicates)} sets of duplicate DIDs...")
     
     db = Database()
-    if not db.test_connection():
+    if not await db.test_connection():
         logger.error("Database connection test failed. Cannot clean up duplicates.")
         return 0
     
@@ -77,11 +77,11 @@ async def clean_duplicate_dids(duplicates):
             entries_query = """
                 SELECT id, did, block_type, source_account_id, first_seen, last_seen
                 FROM blocked_accounts
-                WHERE did = %s AND block_type = %s AND source_account_id = %s
+                WHERE did = $1 AND block_type = $2 AND source_account_id = $3
                 ORDER BY last_seen DESC, id DESC
             """
             
-            entries = db.execute_query(entries_query, [did, block_type, source_account_id])
+            entries = await db.execute_query(entries_query, [did, block_type, source_account_id])
             
             if len(entries) <= 1:
                 logger.info(f"Only one entry found for DID {did}, block_type {block_type}, source {source_account_id}. Skipping.")
@@ -94,13 +94,12 @@ async def clean_duplicate_dids(duplicates):
             delete_ids = [entry['id'] for entry in entries[1:]]
             
             if delete_ids:
-                placeholders = ','.join(['%s'] * len(delete_ids))
-                delete_query = f"""
+                delete_query = """
                     DELETE FROM blocked_accounts
-                    WHERE id IN ({placeholders})
+                    WHERE id = ANY($1::int[])
                 """
                 
-                result = db.execute_query(delete_query, delete_ids, commit=True)
+                result = await db.execute_query(delete_query, [delete_ids], commit=True)
                 logger.info(f"Deleted {len(delete_ids)} duplicate entries for DID {did}, keeping ID {keep_id}")
                 cleaned_count += len(delete_ids)
         except Exception as e:

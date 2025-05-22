@@ -19,7 +19,7 @@ TEST_DID = f"did:plc:test{random.randint(10000, 99999)}"
 async def main():
     # Initialize database
     db = Database()
-    logger.info(f"Testing database connection: {db.test_connection()}")
+    logger.info(f"Testing database connection: {await db.test_connection()}")
     
     # Create a secondary account agent
     secondary_handle = os.getenv('SECONDARY_ACCOUNT')
@@ -57,7 +57,7 @@ async def main():
         
         # Add it to the database
         logger.info(f"Adding block to database...")
-        secondary_agent.database.add_blocked_account(
+        await secondary_agent.database.add_blocked_account(
             did=TEST_DID,
             handle=None,
             source_account_id=secondary_agent.account_id,

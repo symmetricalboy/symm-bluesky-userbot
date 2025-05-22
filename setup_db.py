@@ -1,9 +1,9 @@
 import os
-import psycopg2
-from psycopg2 import sql
-from dotenv import load_dotenv
 import logging
 import urllib.parse
+import asyncio
+import asyncpg
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -11,7 +11,7 @@ load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
-def setup_database(test_mode=None, force_local=True):
+async def setup_database(test_mode=None, force_local=True):
     """Set up database tables, supporting both individual connection params and DATABASE_URL.
     
     Args:
@@ -30,7 +30,6 @@ def setup_database(test_mode=None, force_local=True):
     
     database_url = os.getenv('DATABASE_URL')
     conn = None
-    cursor = None
     
     try:
         if use_test_connection:
@@ -44,9 +43,7 @@ def setup_database(test_mode=None, force_local=True):
             logger.info(f"Using TEST_DATABASE_URL to set up {table_type} tables")
             parsed_url = urllib.parse.urlparse(test_database_url)
             db_name = parsed_url.path.lstrip('/')
-            conn = psycopg2.connect(test_database_url)
-            conn.autocommit = True
-            cursor = conn.cursor()
+            conn = await asyncpg.connect(test_database_url)
             logger.info(f"Connected to database '{db_name}' via TEST_DATABASE_URL")
         else:
             # In production mode, check DATABASE_URL first (for backwards compatibility)
@@ -55,42 +52,38 @@ def setup_database(test_mode=None, force_local=True):
                 logger.info("Using DATABASE_URL for production database setup")
                 parsed_url = urllib.parse.urlparse(database_url)
                 db_name = parsed_url.path.lstrip('/')
-                conn = psycopg2.connect(database_url)
-                conn.autocommit = True
-                cursor = conn.cursor()
+                conn = await asyncpg.connect(database_url)
                 logger.info(f"Connected to production database '{db_name}' via DATABASE_URL")
             else:
                 DB_HOST = os.getenv('DB_HOST', 'localhost')
-                DB_PORT = os.getenv('DB_PORT', '5432')
+                DB_PORT = int(os.getenv('DB_PORT', '5432'))
                 DB_NAME = os.getenv('DB_NAME', 'symm_blocks')
                 DB_USER = os.getenv('DB_USER', 'postgres')
                 DB_PASSWORD = os.getenv('DB_PASSWORD', '')
                 
-                # First, check if the database exists, connect to 'postgres' database initially
+                # First, check if the database exists
                 try:
-                    conn_pg = psycopg2.connect(
-                        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname='postgres'
+                    conn_pg = await asyncpg.connect(
+                        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, database='postgres'
                     )
-                    conn_pg.autocommit = True
-                    cursor_pg = conn_pg.cursor()
-                    cursor_pg.execute("SELECT 1 FROM pg_database WHERE datname = %s", (DB_NAME,))
-                    if cursor_pg.fetchone() is None:
+                    # Check if database exists
+                    exists = await conn_pg.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", DB_NAME)
+                    
+                    if not exists:
                         logger.info(f"Creating database '{DB_NAME}'...")
-                        cursor_pg.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(DB_NAME)))
+                        await conn_pg.execute(f'CREATE DATABASE "{DB_NAME}"')
                     else:
                         logger.info(f"Database '{DB_NAME}' already exists.")
-                    cursor_pg.close()
-                    conn_pg.close()
+                    
+                    await conn_pg.close()
                 except Exception as e:
                     logger.warning(f"Could not connect to 'postgres' database to check if '{DB_NAME}' exists: {e}")
                     logger.info(f"Attempting to connect directly to '{DB_NAME}'...")
                 
                 try:
-                    conn = psycopg2.connect(
-                        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=DB_NAME
+                    conn = await asyncpg.connect(
+                        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, database=DB_NAME
                     )
-                    conn.autocommit = True
-                    cursor = conn.cursor()
                     logger.info(f"Connected to database '{DB_NAME}'")
                 except Exception as e:
                     logger.error(f"Failed to connect to database '{DB_NAME}': {e}")
@@ -103,7 +96,7 @@ def setup_database(test_mode=None, force_local=True):
         logger.info("Creating/Altering tables if they don't exist or need changes...")
         
         # First, check if the accounts table exists
-        cursor.execute(f"""
+        accounts_table_exists = await conn.fetchval(f"""
         SELECT EXISTS (
             SELECT FROM information_schema.tables 
             WHERE table_schema = 'public' 
@@ -111,12 +104,10 @@ def setup_database(test_mode=None, force_local=True):
         )
         """)
         
-        accounts_table_exists = cursor.fetchone()[0]
-        
         # Create accounts table if it doesn't exist
         if not accounts_table_exists:
             logger.info(f"Creating accounts{table_suffix} table...")
-            cursor.execute(f"""
+            await conn.execute(f"""
             CREATE TABLE accounts{table_suffix} (
                 id SERIAL PRIMARY KEY,
                 handle TEXT UNIQUE NOT NULL,
@@ -130,7 +121,7 @@ def setup_database(test_mode=None, force_local=True):
             logger.info(f"accounts{table_suffix} table created successfully!")
         else:
             # Check if updated_at column exists and add it if it doesn't
-            cursor.execute(f"""
+            updated_at_exists = await conn.fetchval(f"""
             SELECT EXISTS (
                 SELECT FROM information_schema.columns 
                 WHERE table_schema = 'public' 
@@ -139,18 +130,16 @@ def setup_database(test_mode=None, force_local=True):
             )
             """)
             
-            updated_at_exists = cursor.fetchone()[0]
-            
             if not updated_at_exists:
                 logger.info(f"Adding updated_at column to accounts{table_suffix} table...")
-                cursor.execute(f"""
+                await conn.execute(f"""
                 ALTER TABLE accounts{table_suffix} 
                 ADD COLUMN updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 """)
                 logger.info(f"Added updated_at column to accounts{table_suffix} table")
 
             # Check if last_firehose_cursor column exists and add it if it doesn't
-            cursor.execute(f"""
+            last_firehose_cursor_exists = await conn.fetchval(f"""
             SELECT EXISTS (
                 SELECT FROM information_schema.columns 
                 WHERE table_schema = 'public' 
@@ -158,17 +147,16 @@ def setup_database(test_mode=None, force_local=True):
                 AND column_name = 'last_firehose_cursor'
             )
             """)
-            last_firehose_cursor_exists = cursor.fetchone()[0]
             if not last_firehose_cursor_exists:
                 logger.info(f"Adding last_firehose_cursor column to accounts{table_suffix} table...")
-                cursor.execute(f"""
+                await conn.execute(f"""
                 ALTER TABLE accounts{table_suffix}
                 ADD COLUMN last_firehose_cursor BIGINT DEFAULT NULL
                 """)
                 logger.info(f"Added last_firehose_cursor column to accounts{table_suffix} table")
         
         # Check for blocked_accounts table
-        cursor.execute(f"""
+        blocked_accounts_exists = await conn.fetchval(f"""
         SELECT EXISTS (
             SELECT FROM information_schema.tables 
             WHERE table_schema = 'public' 
@@ -176,12 +164,10 @@ def setup_database(test_mode=None, force_local=True):
         )
         """)
         
-        blocked_accounts_exists = cursor.fetchone()[0]
-        
         # Create blocked_accounts table if it doesn't exist
         if not blocked_accounts_exists:
             logger.info(f"Creating blocked_accounts{table_suffix} table...")
-            cursor.execute(f"""
+            await conn.execute(f"""
             CREATE TABLE blocked_accounts{table_suffix} (
                 id SERIAL PRIMARY KEY,
                 did TEXT NOT NULL,
@@ -198,7 +184,7 @@ def setup_database(test_mode=None, force_local=True):
             logger.info(f"blocked_accounts{table_suffix} table created successfully!")
         
         # Check for mod_lists table
-        cursor.execute(f"""
+        mod_lists_exists = await conn.fetchval(f"""
         SELECT EXISTS (
             SELECT FROM information_schema.tables 
             WHERE table_schema = 'public' 
@@ -206,12 +192,10 @@ def setup_database(test_mode=None, force_local=True):
         )
         """)
         
-        mod_lists_exists = cursor.fetchone()[0]
-        
         # Create mod_lists table if it doesn't exist
         if not mod_lists_exists:
             logger.info(f"Creating mod_lists{table_suffix} table...")
-            cursor.execute(f"""
+            await conn.execute(f"""
             CREATE TABLE mod_lists{table_suffix} (
                 id SERIAL PRIMARY KEY,
                 list_uri TEXT UNIQUE NOT NULL,
@@ -228,14 +212,10 @@ def setup_database(test_mode=None, force_local=True):
 
     except Exception as e:
         logger.error(f"Database setup error: {e}")
-        if conn and not conn.autocommit:
-            conn.rollback()
-        raise # Re-raise the exception after logging and potential rollback
+        raise  # Re-raise the exception after logging
     finally:
-        if cursor:
-            cursor.close()
         if conn:
-            conn.close()
+            await conn.close()
 
 if __name__ == "__main__":
-    setup_database() 
+    asyncio.run(setup_database()) 

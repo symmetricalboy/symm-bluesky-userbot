@@ -21,7 +21,7 @@ async def test_mod_list_sync():
     
     # Initialize database
     db = Database()
-    if not db.test_connection():
+    if not await db.test_connection():
         logger.error("Database connection test failed. Cannot test mod list sync.")
         return False
     
@@ -44,13 +44,13 @@ async def test_mod_list_sync():
         return False
     
     # Get primary account from database
-    primary_account = db.get_primary_account()
+    primary_account = await db.get_primary_account()
     if not primary_account:
         logger.error("No primary account found in database")
         return False
     
     # Get moderation list from database
-    mod_lists = db.get_mod_lists_by_owner(primary_account['did'])
+    mod_lists = await db.get_mod_lists_by_owner(primary_account['did'])
     if not mod_lists:
         logger.info("No moderation list found in database. Creating one...")
         
@@ -80,7 +80,7 @@ async def test_mod_list_sync():
             logger.info(f"Created new moderation list: {mod_list_uri}")
             
             # Register mod list in database
-            db.register_mod_list(
+            await db.register_mod_list(
                 list_uri=mod_list_uri,
                 list_cid=mod_list_cid,
                 owner_did=client.me.did,
@@ -99,7 +99,7 @@ async def test_mod_list_sync():
     logger.info("Getting blocked accounts from database...")
     
     # Get all blocks from the database (not filtered by account)
-    blocks = db.get_all_blocked_accounts()
+    blocks = await db.get_all_blocked_accounts()
     
     # Filter to only include 'blocking' type blocks
     blocking_blocks = [block for block in blocks if block['block_type'] == 'blocking']
