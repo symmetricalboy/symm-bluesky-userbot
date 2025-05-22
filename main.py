@@ -30,25 +30,18 @@ def is_database_setup():
         # Check for Railway-style DATABASE_URL
         database_url = os.getenv('DATABASE_URL')
         
+        conn_params = {}
         if database_url:
             # Connect using the DATABASE_URL
             conn = psycopg2.connect(database_url)
         else:
             # Use individual connection parameters
-            DB_HOST = os.getenv('DB_HOST', 'localhost')
-            DB_PORT = os.getenv('DB_PORT', '5432')
-            DB_NAME = os.getenv('DB_NAME', 'symm_blocks')
-            DB_USER = os.getenv('DB_USER', 'postgres')
-            DB_PASSWORD = os.getenv('DB_PASSWORD', '')
-            
-            # Try to connect to the application database
-            conn = psycopg2.connect(
-                host=DB_HOST,
-                port=DB_PORT,
-                user=DB_USER,
-                password=DB_PASSWORD,
-                dbname=DB_NAME
-            )
+            conn_params['host'] = os.getenv('DB_HOST', 'localhost')
+            conn_params['port'] = os.getenv('DB_PORT', '5432')
+            conn_params['dbname'] = os.getenv('DB_NAME', 'symm_blocks')
+            conn_params['user'] = os.getenv('DB_USER', 'postgres')
+            conn_params['password'] = os.getenv('DB_PASSWORD', '')
+            conn = psycopg2.connect(**conn_params)
             
         cursor = conn.cursor()
         
@@ -57,35 +50,67 @@ def is_database_setup():
         cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
         existing_tables = [row[0] for row in cursor.fetchall()]
         
-        # If accounts table exists, check for updated_at column
-        if 'accounts' in existing_tables:
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.columns 
-                    WHERE table_schema = 'public' 
-                    AND table_name = 'accounts' 
-                    AND column_name = 'updated_at'
-                )
-            """)
-            updated_at_exists = cursor.fetchone()[0]
-            if not updated_at_exists:
-                logger.info("accounts table exists but is missing updated_at column")
-                cursor.close()
-                conn.close()
-                return False
-        
-        cursor.close()
-        conn.close()
-        
-        # Check if all required tables exist
         all_tables_exist = all(table in existing_tables for table in required_tables)
         if not all_tables_exist:
             missing_tables = [table for table in required_tables if table not in existing_tables]
-            logger.info(f"Missing required tables: {', '.join(missing_tables)}")
-        return all_tables_exist
+            logger.warning(f"Database check: Missing required tables: {', '.join(missing_tables)}")
+            cursor.close()
+            conn.close()
+            return False
+
+        # Check for 'updated_at' column in 'accounts' table
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.columns 
+                WHERE table_schema = 'public' 
+                AND table_name = 'accounts' 
+                AND column_name = 'updated_at'
+            )
+        """)
+        updated_at_exists = cursor.fetchone()[0]
+        if not updated_at_exists:
+            logger.warning("Database check: 'accounts' table is missing 'updated_at' column.")
+            cursor.close()
+            conn.close()
+            return False
+
+        # Check for 'last_firehose_cursor' column in 'accounts' table
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.columns 
+                WHERE table_schema = 'public' 
+                AND table_name = 'accounts' 
+                AND column_name = 'last_firehose_cursor'
+            )
+        """)
+        last_firehose_cursor_exists = cursor.fetchone()[0]
+        if not last_firehose_cursor_exists:
+            logger.warning("Database check: 'accounts' table is missing 'last_firehose_cursor' column.")
+            cursor.close()
+            conn.close()
+            return False
+            
+        # Add checks for other critical columns if necessary, for example:
+        # Check for 'is_primary' in 'accounts'
+        # Check for 'source_account_id', 'did', 'block_type' in 'blocked_accounts'
+        # Check for 'list_uri', 'owner_did' in 'mod_lists'
+
+        logger.info("Database check: All required tables and critical columns appear to exist.")
+        cursor.close()
+        conn.close()
+        return True
         
+    except psycopg2.OperationalError as e:
+        # This handles cases like database not existing or wrong credentials
+        db_name_to_log = conn_params.get('dbname', 'configured_db (via DATABASE_URL)') if conn_params else 'configured_db (via DATABASE_URL)'
+        logger.warning(f"Database check: OperationalError connecting to or querying database '{db_name_to_log}'. Error: {e}")
+        if cursor: cursor.close()
+        if conn: conn.close()
+        return False
     except Exception as e:
-        logger.info(f"Database check failed: {e}")
+        logger.error(f"Database check: An unexpected error occurred: {e}", exc_info=True)
+        if cursor: cursor.close()
+        if conn: conn.close()
         return False
 
 async def initialize_agents():

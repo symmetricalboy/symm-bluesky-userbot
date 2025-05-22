@@ -3,10 +3,15 @@ import asyncio
 import logging
 import httpx
 from atproto import AsyncClient as ATProtoAsyncClient
-from atproto_client import models
+from atproto_client.models.app.bsky.graph.list import Main as ListRecord
+from atproto_client.models.app.bsky.graph.listitem import Main as ListItemRecord
+from atproto_client.models.app.bsky.graph.block import Main as BlockRecord
+from atproto_client.models.app.bsky.graph.get_blocks import Params as GetBlocksParams
+from atproto_client.models.app.bsky.graph.get_list import Params as GetListParams
+from atproto_client.models.com.atproto.sync.subscribe_repos import Commit as FirehoseCommitModel
+
 from atproto_firehose import AsyncFirehoseSubscribeReposClient
 from atproto_firehose.models import MessageFrame
-
 from atproto_core.car import CAR
 import cbor2
 from database import Database
@@ -93,7 +98,7 @@ class AccountAgent:
         try:
             logger.info(f"Creating or updating moderation list for primary account {self.handle}...")
             
-            list_record_data = models.AppBskyGraphList.Main(
+            list_record_data = ListRecord(
                 purpose=list_purpose,
                 name=list_name,
                 description=list_description,
@@ -170,7 +175,7 @@ class AccountAgent:
         if self.is_primary and self.mod_list_uri:
             logger.info(f"Primary account {self.handle} attempting to add {blocked_did} to moderation list {self.mod_list_uri}")
             try:
-                list_item_record = models.AppBskyGraphListitem.Main(
+                list_item_record = ListItemRecord(
                     subject=blocked_did,
                     list=self.mod_list_uri,
                     created_at=self.client.get_current_time_iso()
@@ -217,7 +222,7 @@ class AccountAgent:
                     await self.database.save_last_firehose_cursor(self.did, current_seq)
                 return False # Continue processing
 
-            commit_data: models.ComAtprotoSyncSubscribeRepos.Commit = message.data
+            commit_data: FirehoseCommitModel = message.data
             current_seq = commit_data.seq # Ensure we use commit's seq, which should always exist for #commit
 
             logger.debug(f"FIREHOSE_HANDLER ({self.did}): Processing commit. Repo: {commit_data.repo}, Seq: {current_seq}, Prev: {commit_data.prev}, Ops: {len(commit_data.ops)}, Blocks Size: {len(commit_data.blocks) if commit_data.blocks else 0}")
@@ -268,7 +273,7 @@ class AccountAgent:
                                 record_dict['$type'] = 'app.bsky.graph.block'
                                 logger.debug(f"FIREHOSE_HANDLER ({self.did}): Added '$type': 'app.bsky.graph.block' to record_dict for CID {op.cid}")
                             
-                            block_record = models.AppBskyGraphBlock.Main.model_validate(record_dict)
+                            block_record = BlockRecord.model_validate(record_dict)
                             blocked_did = block_record.subject
                             logger.info(f"FIREHOSE_HANDLER ({self.did}): Successfully parsed BlockRecord. Subject (blocked DID): {blocked_did}")
                             
@@ -500,7 +505,7 @@ class AccountAgent:
         for attempt in range(max_attempts):
             try:
                 logger.debug(f"BLUESKY_API_SYNC ({self.handle}): get_blocks attempt {attempt + 1}/{max_attempts}. Cursor: {cursor}")
-                params = models.AppBskyGraphGetBlocks.Params(cursor=cursor, limit=100)
+                params = GetBlocksParams(cursor=cursor, limit=100)
                 response = await self.client.app.bsky.graph.get_blocks(params=params)
                 
                 if response and response.blocks:
@@ -565,7 +570,7 @@ class AccountAgent:
                 if not already_blocked_by_primary_in_db:
                     logger.info(f"PRIMARY_SYNC ({self.handle}): Attempting to create Bluesky block for {did_to_block} (as it's not in DB as primary's block).")
                     try:
-                        block_record_data = models.AppBskyGraphBlock.Main(subject=did_to_block, created_at=self.client.get_current_time_iso())
+                        block_record_data = BlockRecord(subject=did_to_block, created_at=self.client.get_current_time_iso())
                         await self.client.com.atproto.repo.create_record(
                             repo=self.did, collection='app.bsky.graph.block',
                             record=block_record_data.model_dump(exclude_none=True, by_alias=True)
@@ -596,7 +601,7 @@ class AccountAgent:
                 # Step 2: Add to moderation list (if not already there - create_record handles conflict)
                 logger.info(f"PRIMARY_SYNC ({self.handle}): Attempting to add {did_to_block} to moderation list {self.mod_list_uri}")
                 try:
-                    list_item_record = models.AppBskyGraphListitem.Main(
+                    list_item_record = ListItemRecord(
                         subject=did_to_block, list=self.mod_list_uri,
                         created_at=self.client.get_current_time_iso()
                     )
@@ -645,7 +650,7 @@ class AccountAgent:
             while True:
                 page_num += 1
                 logger.debug(f"MOD_LIST_SYNC ({self.handle}): Fetching page {page_num} of list items. Cursor: {cursor}")
-                params = models.AppBskyGraphGetList.Params(list=self.mod_list_uri, limit=100, cursor=cursor)
+                params = GetListParams(list=self.mod_list_uri, limit=100, cursor=cursor)
                 response = await self.client.app.bsky.graph.get_list(params=params)
                 
                 if not response or not response.items:
@@ -682,7 +687,7 @@ class AccountAgent:
             for i, did_to_add in enumerate(list(dids_to_add)): 
                 try:
                     logger.debug(f"MOD_LIST_SYNC ({self.handle}): Adding DID {did_to_add} ({i+1}/{len(dids_to_add)})...")
-                    list_item_record = models.AppBskyGraphListitem.Main(
+                    list_item_record = ListItemRecord(
                         subject=did_to_add, list=self.mod_list_uri,
                         created_at=self.client.get_current_time_iso()
                     )
