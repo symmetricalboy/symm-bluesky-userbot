@@ -8,6 +8,8 @@ from atproto_client.models.app.bsky.graph.listitem import Record as ListItemReco
 from atproto_client.models.app.bsky.graph.block import Record as BlockRecord
 from atproto_client.models.app.bsky.graph.get_blocks import Params as GetBlocksParams
 from atproto_client.models.app.bsky.graph.get_list import Params as GetListParams
+from atproto_client.models.com.atproto.repo.put_record import Data as PutRecordData
+from atproto_client.models.com.atproto.repo.create_record import Data as CreateRecordData
 from atproto_client.models.com.atproto.sync.subscribe_repos import Commit as FirehoseCommitModel
 
 from atproto_firehose import AsyncFirehoseSubscribeReposClient
@@ -121,22 +123,24 @@ class AccountAgent:
             
             if existing_list:
                 logger.info(f"Updating existing moderation list {existing_list.uri} for {self.handle}...")
-                response = await self.client.com.atproto.repo.put_record(
+                data = PutRecordData(
                     repo=self.did,
                     collection='app.bsky.graph.list',
                     rkey=existing_list.uri.split('/')[-1],
                     record=list_record_data.model_dump(exclude_none=True, by_alias=True)
                 )
+                response = await self.client.com.atproto.repo.put_record(data=data)
                 list_uri = existing_list.uri
                 list_cid = str(response.cid) 
                 logger.info(f"Updated existing moderation list: {list_uri} (CID: {list_cid})")
             else:
                 logger.info(f"Creating new moderation list for {self.handle}...")
-                response = await self.client.com.atproto.repo.create_record(
+                data = CreateRecordData(
                     repo=self.did,
                     collection='app.bsky.graph.list',
                     record=list_record_data.model_dump(exclude_none=True, by_alias=True)
                 )
+                response = await self.client.com.atproto.repo.create_record(data=data)
                 list_uri = response.uri
                 list_cid = str(response.cid)
                 logger.info(f"Created new moderation list: {list_uri} (CID: {list_cid})")
@@ -180,11 +184,12 @@ class AccountAgent:
                     list=self.mod_list_uri,
                     created_at=self.client.get_current_time_iso()
                 )
-                await self.client.com.atproto.repo.create_record(
+                data = CreateRecordData(
                     repo=self.did, 
                     collection='app.bsky.graph.listitem',
                     record=list_item_record.model_dump(exclude_none=True, by_alias=True)
                 )
+                await self.client.com.atproto.repo.create_record(data=data)
                 logger.info(f"Successfully added {blocked_did} to mod list {self.mod_list_uri} by {self.handle}.")
             except Exception as e:
                 if "Conflict" in str(e) or "Record already exists" in str(e):
@@ -610,10 +615,12 @@ class AccountAgent:
                     logger.info(f"PRIMARY_SYNC ({self.handle}): Attempting to create Bluesky block for {did_to_block} (as it's not in DB as primary's block).")
                     try:
                         block_record_data = BlockRecord(subject=did_to_block, created_at=self.client.get_current_time_iso())
-                        await self.client.com.atproto.repo.create_record(
-                            repo=self.did, collection='app.bsky.graph.block',
+                        data = CreateRecordData(
+                            repo=self.did, 
+                            collection='app.bsky.graph.block',
                             record=block_record_data.model_dump(exclude_none=True, by_alias=True)
                         )
+                        await self.client.com.atproto.repo.create_record(data=data)
                         logger.info(f"PRIMARY_SYNC ({self.handle}): Successfully created Bluesky block for {did_to_block}.")
                         # Now, add this action to our DB for the primary account
                         self.database.add_blocked_account(
@@ -644,10 +651,12 @@ class AccountAgent:
                         subject=did_to_block, list=self.mod_list_uri,
                         created_at=self.client.get_current_time_iso()
                     )
-                    await self.client.com.atproto.repo.create_record(
-                        repo=self.did, collection='app.bsky.graph.listitem',
+                    data = CreateRecordData(
+                        repo=self.did, 
+                        collection='app.bsky.graph.listitem',
                         record=list_item_record.model_dump(exclude_none=True, by_alias=True)
                     )
+                    await self.client.com.atproto.repo.create_record(data=data)
                     logger.info(f"PRIMARY_SYNC ({self.handle}): Successfully added/ensured {did_to_block} is on mod list {self.mod_list_uri}.")
                 except Exception as e_list_add:
                     if "Conflict" in str(e_list_add) or "Record already exists" in str(e_list_add):
@@ -730,10 +739,12 @@ class AccountAgent:
                         subject=did_to_add, list=self.mod_list_uri,
                         created_at=self.client.get_current_time_iso()
                     )
-                    await self.client.com.atproto.repo.create_record(
-                        repo=self.did, collection='app.bsky.graph.listitem',
+                    data = CreateRecordData(
+                        repo=self.did, 
+                        collection='app.bsky.graph.listitem',
                         record=list_item_record.model_dump(exclude_none=True, by_alias=True)
                     )
+                    await self.client.com.atproto.repo.create_record(data=data)
                     logger.info(f"MOD_LIST_SYNC ({self.handle}): Successfully added {did_to_add} to mod list.")
                     await asyncio.sleep(0.1) 
                 except Exception as e:
