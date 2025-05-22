@@ -4,6 +4,8 @@ import logging
 import argparse
 import signal
 import psycopg2
+import sys
+from datetime import datetime
 from dotenv import load_dotenv
 from account_agent import AccountAgent, CLEARSKY_API_BASE_URL
 from setup_db import setup_database
@@ -318,12 +320,67 @@ async def run_test_mode():
     logger.info("TEST MODE completed - no changes were made")
     return test_success
 
+async def run_diagnostics():
+    """Run database diagnostics before starting the application."""
+    logger.info("=== RUNNING DATABASE DIAGNOSTICS ===")
+    
+    # Create a unique log file name with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = f"diagnostic_results_{timestamp}.log"
+    
+    # Set up file handler for diagnostic logging
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    
+    # Add the file handler to the root logger
+    root_logger = logging.getLogger()
+    root_logger.addHandler(file_handler)
+    
+    try:
+        # Import and run the diagnostics
+        import test_direct_db
+        test_direct_db.run_diagnostics()
+        logger.info("Database diagnostics completed successfully.")
+    except Exception as e:
+        logger.error(f"Database diagnostics failed: {e}")
+    finally:
+        # Remove the file handler
+        root_logger.removeHandler(file_handler)
+        
+        # Log the location of the diagnostic results
+        logger.info(f"Diagnostic results saved to {log_file}")
+        
+        # Output a separator for clarity in logs
+        logger.info("="*50)
+    
+    return True
+
+async def run_test_block_sync():
+    """Run a test block sync to verify sync functionality."""
+    logger.info("=== RUNNING TEST BLOCK SYNC ===")
+    try:
+        # Import the test module and run it
+        import test_block_sync
+        # Since test_block_sync is designed to be run as a script with asyncio.run(),
+        # we need to call its main function directly instead
+        await test_block_sync.main()
+        logger.info("Test block sync completed successfully.")
+    except Exception as e:
+        logger.error(f"Test block sync failed: {e}")
+    finally:
+        # Output a separator for clarity in logs
+        logger.info("="*50)
+    
+    return True
+
 async def main():
     """Main function to run the bot."""
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Bluesky account agent for synchronizing blocks across accounts')
     parser.add_argument('--test', action='store_true', help='Run in test mode without making any changes')
     parser.add_argument('--test-modlist', action='store_true', help='Test moderation list functionality')
+    parser.add_argument('--skip-diagnostics', action='store_true', help='Skip running diagnostics and tests')
     args = parser.parse_args()
     
     # Run in test mode if requested
@@ -338,6 +395,24 @@ async def main():
     
     # Normal operation mode
     logger.info("Starting Bluesky account agent...")
+
+    # Run diagnostics and tests first, unless explicitly skipped
+    if not args.skip_diagnostics:
+        try:
+            logger.info("Running diagnostics and tests before starting main application...")
+            # Run database diagnostics
+            await run_diagnostics()
+            
+            # Run test block sync (optional - only if DB is set up)
+            if is_database_setup():
+                await run_test_block_sync()
+            else:
+                logger.warning("Skipping test block sync because database is not set up")
+        except Exception as e:
+            logger.error(f"Error during diagnostics/tests: {e}")
+            logger.info("Continuing with main application despite diagnostic errors")
+    else:
+        logger.info("Skipping diagnostics and tests (--skip-diagnostics flag used)")
 
     # Check and set up database
     logger.info("Checking database setup...")
