@@ -212,6 +212,10 @@ class AccountAgent:
             if message.data and hasattr(message.data, 'seq'):
                 current_seq = message.data.seq
             
+            # INFO Log for any commit message received
+            if message.type == '#commit':
+                logger.info(f"FIREHOSE_HANDLER ({self.did}): Received a #commit message. Seq: {current_seq if current_seq else 'N/A'}, Repo: {message.data.repo if message.data and hasattr(message.data, 'repo') else 'Unknown Repo'}")
+
             logger.debug(f"FIREHOSE_HANDLER ({self.did}): Received message type '{message.type}', Seq: {current_seq if current_seq else 'N/A'}")
 
             if not message.data or message.type != '#commit':
@@ -546,6 +550,7 @@ class AccountAgent:
         return blocked_by_dids
 
     async def fetch_bluesky_blocks(self):
+        logger.info(f"DEBUG_PROBE: fetch_bluesky_blocks called for {self.handle}") # ADDED DEBUG PROBE
         logger.info(f"BLUESKY_API_SYNC ({self.handle}): Fetching accounts this account is blocking (for initial sync)...")
         blocked_accounts_dids = []
         cursor = None
@@ -555,6 +560,7 @@ class AccountAgent:
 
         for attempt in range(max_attempts):
             try:
+                logger.info(f"DEBUG_PROBE: fetch_bluesky_blocks - Entering attempt loop {attempt + 1} for {self.handle}") # ADDED DEBUG PROBE
                 logger.debug(f"BLUESKY_API_SYNC ({self.handle}): get_blocks attempt {attempt + 1}/{max_attempts}. Cursor: {cursor}")
                 params = GetBlocksParams(cursor=cursor, limit=100)
                 response = await self.client.app.bsky.graph.get_blocks(params=params)
