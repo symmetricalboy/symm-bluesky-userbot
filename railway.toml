@@ -1,6 +1,5 @@
 [build]
-# Use Python 3.13
-builder = "heroku/python"
+# Railway automatically detects Python projects
 
 [deploy]
 # Start command for the main application
