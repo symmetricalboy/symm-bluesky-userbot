@@ -492,4 +492,18 @@ class Database:
             raise
         finally:
             cursor.close()
-            conn.close() 
+            conn.close()
+
+    def get_mod_lists_by_owner(self, owner_did):
+        """Get moderation lists by owner DID."""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("SELECT * FROM mod_lists WHERE owner_did = %s", (owner_did,))
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Error getting moderation lists for owner {owner_did}: {e}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()  

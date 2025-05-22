@@ -17,6 +17,7 @@ from atproto_firehose.models import MessageFrame
 from atproto_core.car import CAR
 import cbor2
 from database import Database
+from test_mod_list_sync import sync_mod_list_from_db
 import time 
 
 # Set up logging
@@ -831,32 +832,52 @@ class AccountAgent:
         
         logger.info(f"MOD_LIST_SYNC ({self.handle}): Full moderation list sync completed.")
 
-    async def sync_all_account_data(self, initial_sync=False):
-        if not self.did or not self.account_id:
-            logger.error(f"DATA_SYNC_CYCLE ({self.handle}): Account not initialized (DID: {self.did}, ID: {self.account_id}). Skipping sync.")
-            return
-
-        logger.info(f"DATA_SYNC_CYCLE ({self.handle}): Starting... (Initial Sync: {initial_sync})")
+    async def sync_mod_list_with_database(self):
+        """Sync moderation list with the database for primary account"""
+        if not self.is_primary:
+            logger.debug(f"MOD_LIST_SYNC ({self.handle}): Not a primary account, skipping moderation list sync")
+            return False
         
-        logger.info(f"DATA_SYNC_CYCLE ({self.handle}): Fetching who is blocking this account from ClearSky...")
-        await self.fetch_who_is_blocking_me_from_clearsky()
+        logger.info(f"MOD_LIST_SYNC ({self.handle}): Syncing moderation list with database...")
+        try:
+            # Use the function from test_mod_list_sync.py
+            success = await sync_mod_list_from_db()
+            if success:
+                logger.info(f"MOD_LIST_SYNC ({self.handle}): Successfully synchronized blocks to moderation list")
+            else:
+                logger.error(f"MOD_LIST_SYNC ({self.handle}): Failed to synchronize blocks to moderation list")
+            return success
+        except Exception as e:
+            logger.error(f"MOD_LIST_SYNC ({self.handle}): Error synchronizing blocks to moderation list: {e}", exc_info=True)
+            return False
 
-        if initial_sync: 
-            logger.info(f"DATA_SYNC_CYCLE ({self.handle}): Initial sync, fetching blocks from Bluesky API...")
-            await self.fetch_bluesky_blocks() 
-        else:
-            logger.info(f"DATA_SYNC_CYCLE ({self.handle}): Not initial sync, skipping direct Bluesky API block fetch (firehose handles ongoing).")
-
-
-        if self.is_primary:
-            logger.info(f"DATA_SYNC_CYCLE ({self.handle}): Primary account, syncing blocks from other managed accounts...")
-            await self.sync_blocks_from_others()
-            logger.info(f"DATA_SYNC_CYCLE ({self.handle}): Primary account, performing full moderation list update...")
-            await self.update_moderation_list_items()
-        else:
-            logger.debug(f"DATA_SYNC_CYCLE ({self.handle}): Secondary account, skipping primary-specific sync tasks.")
-
-        logger.info(f"DATA_SYNC_CYCLE ({self.handle}): Cycle completed.")
+    async def sync_all_account_data(self, initial_sync=False):
+        """Synchronize all data for this account"""
+        if self._blocks_monitor_stop_event.is_set():
+            logger.info(f"BLOCKS_MONITOR ({self.handle}): Stop event set, skipping full sync")
+            return
+            
+        logger.info(f"BLOCKS_MONITOR ({self.handle}): Running full account data sync for {self.handle} (initial_sync={initial_sync})...")
+        
+        try:
+            # First, fetch blocks from Bluesky API
+            await self.fetch_bluesky_blocks()
+            
+            # Only primary accounts do these operations
+            if self.is_primary:
+                # Ensure moderation list is created/updated
+                if not self.mod_list_uri:
+                    await self.create_or_update_moderation_list()
+                
+                # Sync blocks from other (secondary) accounts
+                await self.sync_blocks_from_others()
+                
+                # Sync moderation list with the database (ensures all blocks are reflected in mod list)
+                await self.sync_mod_list_with_database()
+            
+            logger.info(f"BLOCKS_MONITOR ({self.handle}): Full account data sync completed for {self.handle}")
+        except Exception as e:
+            logger.error(f"BLOCKS_MONITOR ({self.handle}): Error during full account data sync: {e}", exc_info=True)
 
     async def _blocks_monitor_loop(self):
         sync_interval_primary_min = int(os.getenv('SYNC_INTERVAL_PRIMARY_MINUTES', 15))

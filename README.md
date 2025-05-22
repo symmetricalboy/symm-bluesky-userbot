@@ -1,75 +1,109 @@
-# Bluesky Account Agent
+# Symmetrical Bluesky Userbot
 
-This is a userbot for Bluesky that synchronizes blocks across multiple accounts.
+A userbot for Bluesky that handles block synchronization between multiple accounts and manages a moderation list.
 
 ## Features
 
-- Automatically synchronize blocks across multiple accounts
-- Monitor for new blocks in real-time
-- Create moderation lists for easy sharing of blocked accounts
+- Synchronizes blocks across multiple Bluesky accounts
+- Creates and maintains a moderation list for the primary account
+- Monitors real-time block events via Jetstream firehose
+- Initializes block data from ClearSky API
+- Persists block information in a PostgreSQL database
 
 ## Setup
 
-1. Create a `.env` file based on `.env.example` with your credentials
-2. Install dependencies with `pip install -r requirements.txt`
-3. Set up the database with `python setup_db.py`
-4. Run the bot with `python main.py`
+1. Clone this repository
+2. Create a virtual environment: `python -m venv .venv`
+3. Activate the virtual environment:
+   - Windows: `.venv\Scripts\activate`
+   - macOS/Linux: `source .venv/bin/activate`
+4. Install dependencies: `pip install -r requirements.txt`
+5. Copy `.env.example` to `.env` and configure your credentials and settings
+6. Run the bot: `python main.py`
 
-## Recent Fixes
+## Configuration
 
-- Fixed moderation list creation by using direct dictionary creation instead of trying to use `models.AppBskyGraphList` as a constructor
-- Corrected ClearSky API endpoint usage, changing from `/blockedby/{did}` to `/single-blocklist/{did}`
-- Updated HTTP client to automatically follow redirects when interacting with external APIs
-- Fixed parameter naming in API calls from `record=` to `data=`
-- Added support for properly handling HTTP redirects from the ClearSky API
-- Fixed handle resolution by using `params={'repo': did}` instead of `repo=did` in the `describe_repo` method
-- **Removed unnecessary handle resolution** for performance and reliability - now using DIDs directly for blocking operations without additional API calls
-- Added testing commands for comprehensive verification:
-  - `python main.py --test`: Test all system components without making changes
-  - `python main.py --test-modlist`: Test moderation list functionality specifically
-  - `python test_handle_resolution.py`: Test DID to handle resolution with proper fallbacks
+Edit the `.env` file with your account credentials:
 
-## Requirements
-
-- Python 3.8+
-- Postgres database
-- Bluesky account credentials
-
-## Testing
-
-You can verify functionality without making actual changes:
-
-```bash
-# Basic component testing
-python main.py --test
-
-# Specific functionality testing
-python main.py --test-modlist
-
-# API testing
-python test_clearsky.py      # Test ClearSky API connection
-python test_mod_list.py      # Test moderation list creation
-python test_account_agent.py # Test account agent functionality
+```
+PRIMARY_BLUESKY_HANDLE="your.primary.handle"
+PRIMARY_BLUESKY_PASSWORD="your-password"
+SECONDARY_ACCOUNTS="secondary.handle1,password1;secondary.handle2,password2"
+DATABASE_URL="postgresql://username:password@host:port/database"
 ```
 
-## Deployment on Railway
+## Usage
 
-This project is designed to be easily deployed on [Railway](https://railway.app/):
+### Standard Operation
 
-1. Create a new project in Railway
-2. Add a PostgreSQL database service
-3. Add a Python service pointing to your repository
-4. Set the environment variables in the Railway dashboard:
-   - `PRIMARY_BLUESKY_HANDLE` and `PRIMARY_BLUESKY_PASSWORD` for the primary account
-   - `SECONDARY_ACCOUNTS` for other accounts
-   - Database credentials will be automatically injected by Railway
-   - Other configuration options as needed
+Run the bot in standard operation mode:
 
-The application will automatically check if the database is set up at startup, and if not, it will run the database setup process. This makes deployment seamless without manual database setup steps.
+```
+python main.py
+```
+
+This will:
+1. Initialize the database schema
+2. Register all accounts in the database
+3. Import initial block data from ClearSky API
+4. Start monitoring for new block events via Jetstream firehose
+5. Synchronize blocks across all accounts
+6. Maintain a moderation list on the primary account
+
+### Command Line Options
+
+- `--test`: Run in test mode without making any changes
+- `--test-modlist`: Test moderation list functionality only
+- `--skip-diagnostics`: Skip running diagnostics and tests
+- `--skip-clearsky-init`: Skip initializing blocks from ClearSky API
+
+### Diagnostics
+
+Run the diagnostic script to check database status and block synchronization:
+
+```
+python run_diagnostic.py
+```
+
+This will:
+1. Initialize accounts in the database
+2. Populate block data from ClearSky API
+3. Display detailed information about accounts and blocks
 
 ## Architecture
 
-- Each account agent runs independently, collecting its own block data
-- All data is centralized in a shared PostgreSQL database
-- The primary account applies the aggregated block list to maintain synchronized blocking
-- HTTP client follows redirects automatically when interacting with the ClearSky API 
+The bot uses:
+- AtProto client library for Bluesky API communication
+- Jetstream firehose for real-time block event monitoring
+- ClearSky API for initial block data import
+- PostgreSQL database for persistence
+
+## Block Synchronization Flow
+
+1. **Initial Setup**:
+   - Accounts are registered in the database
+   - Initial block data is imported from ClearSky API
+
+2. **Ongoing Monitoring**:
+   - Jetstream firehose is used to monitor real-time block events
+   - New blocks are added to the database
+   - Blocks are synchronized across all accounts
+   - The primary account's moderation list is updated
+
+## Troubleshooting
+
+If you're experiencing issues, run the diagnostic script:
+
+```
+python run_diagnostic.py
+```
+
+Or check the database contents directly:
+
+```
+python debug_database.py
+```
+
+## License
+
+[MIT License](LICENSE) 
