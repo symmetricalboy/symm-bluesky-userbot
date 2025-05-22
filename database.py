@@ -14,33 +14,60 @@ logger = logging.getLogger(__name__)
 def get_connection():
     """Get a connection to the database, supporting both individual params and DATABASE_URL."""
     try:
-        # First check for Railway-style DATABASE_URL
-        database_url = os.getenv('DATABASE_URL')
+        # Check if we're in local test mode
+        local_test = os.getenv('LOCAL_TEST', 'False').lower() == 'true'
         
-        if database_url:
-            logger.debug("Connecting using DATABASE_URL")
-            return psycopg2.connect(database_url)
+        if local_test:
+            # In local test mode, use TEST_DATABASE_URL
+            test_database_url = os.getenv('TEST_DATABASE_URL')
+            if test_database_url:
+                logger.debug("Local test mode: Connecting using TEST_DATABASE_URL")
+                return psycopg2.connect(test_database_url)
+            else:
+                logger.error("Local test mode enabled but TEST_DATABASE_URL not found")
+                raise ValueError("LOCAL_TEST=True but TEST_DATABASE_URL not set")
         else:
-            # Fall back to individual connection parameters
-            DB_HOST = os.getenv('DB_HOST', 'localhost')
-            DB_PORT = os.getenv('DB_PORT', '5432')
-            DB_NAME = os.getenv('DB_NAME', 'symm_blocks')
-            DB_USER = os.getenv('DB_USER', 'postgres')
-            DB_PASSWORD = os.getenv('DB_PASSWORD', '')
+            # In production mode, check DATABASE_URL first (for backwards compatibility)
+            database_url = os.getenv('DATABASE_URL')
             
-            logger.debug(f"Connecting using individual parameters to {DB_HOST}:{DB_PORT}/{DB_NAME}")
-            return psycopg2.connect(
-                host=DB_HOST,
-                port=DB_PORT,
-                user=DB_USER,
-                password=DB_PASSWORD,
-                dbname=DB_NAME
-            )
+            if database_url:
+                logger.debug("Production mode: Connecting using DATABASE_URL")
+                return psycopg2.connect(database_url)
+            else:
+                # Fall back to individual connection parameters
+                DB_HOST = os.getenv('DB_HOST', 'localhost')
+                DB_PORT = os.getenv('DB_PORT', '5432')
+                DB_NAME = os.getenv('DB_NAME', 'symm_blocks')
+                DB_USER = os.getenv('DB_USER', 'postgres')
+                DB_PASSWORD = os.getenv('DB_PASSWORD', '')
+                
+                logger.debug(f"Production mode: Connecting using individual parameters to {DB_HOST}:{DB_PORT}/{DB_NAME}")
+                return psycopg2.connect(
+                    host=DB_HOST,
+                    port=DB_PORT,
+                    user=DB_USER,
+                    password=DB_PASSWORD,
+                    dbname=DB_NAME
+                )
     except Exception as e:
         logger.error(f"Database connection error: {e}")
         raise
 
 class Database:
+    def __init__(self, test_mode=None):
+        """Initialize the database connection with option for test mode.
+        
+        Args:
+            test_mode (bool, optional): If provided, overrides the LOCAL_TEST env var.
+        """
+        if test_mode is None:
+            self.test_mode = os.getenv('LOCAL_TEST', 'False').lower() == 'true'
+        else:
+            self.test_mode = test_mode
+            
+        self.table_suffix = "_test" if self.test_mode else ""
+        logger.debug(f"Database initialized in {'test' if self.test_mode else 'production'} mode with table suffix '{self.table_suffix}'")
+
     def get_connection(self):
         """Get a database connection using the global connection function."""
         return get_connection()
@@ -65,20 +92,20 @@ class Database:
         cursor = conn.cursor()
         try:
             # Check if account already exists
-            cursor.execute("SELECT id FROM accounts WHERE did = %s", (did,))
+            cursor.execute(f"SELECT id FROM accounts{self.table_suffix} WHERE did = %s", (did,))
             result = cursor.fetchone()
             
             if result:
                 # Update existing account
                 account_id = result[0]
                 cursor.execute(
-                    "UPDATE accounts SET handle = %s, is_primary = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    f"UPDATE accounts{self.table_suffix} SET handle = %s, is_primary = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                     (handle, is_primary, account_id)
                 )
             else:
                 # Insert new account
                 cursor.execute(
-                    "INSERT INTO accounts (handle, did, is_primary) VALUES (%s, %s, %s) RETURNING id",
+                    f"INSERT INTO accounts{self.table_suffix} (handle, did, is_primary) VALUES (%s, %s, %s) RETURNING id",
                     (handle, did, is_primary)
                 )
                 account_id = cursor.fetchone()[0]
@@ -98,7 +125,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
-            cursor.execute("SELECT * FROM accounts WHERE did = %s", (did,))
+            cursor.execute(f"SELECT * FROM accounts{self.table_suffix} WHERE did = %s", (did,))
             return cursor.fetchone()
         except Exception as e:
             logger.error(f"Error getting account {did}: {e}")
@@ -112,7 +139,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
-            cursor.execute("SELECT * FROM accounts WHERE is_primary = TRUE LIMIT 1")
+            cursor.execute(f"SELECT * FROM accounts{self.table_suffix} WHERE is_primary = TRUE LIMIT 1")
             return cursor.fetchone()
         except Exception as e:
             logger.error(f"Error getting primary account: {e}")
@@ -126,7 +153,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
-            cursor.execute("SELECT * FROM accounts WHERE is_primary = FALSE ORDER BY id")
+            cursor.execute(f"SELECT * FROM accounts{self.table_suffix} WHERE is_primary = FALSE ORDER BY id")
             return cursor.fetchall()
         except Exception as e:
             logger.error(f"Error getting secondary accounts: {e}")
@@ -140,12 +167,12 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT is_primary FROM accounts WHERE id = %s", (source_account_id,))
+            cursor.execute(f"SELECT is_primary FROM accounts{self.table_suffix} WHERE id = %s", (source_account_id,))
             source_is_primary = cursor.fetchone()
             source_is_primary = source_is_primary[0] if source_is_primary else False
 
             cursor.execute(
-                "SELECT id, is_synced FROM blocked_accounts WHERE did = %s AND source_account_id = %s AND block_type = %s",
+                f"SELECT id, is_synced FROM blocked_accounts{self.table_suffix} WHERE did = %s AND source_account_id = %s AND block_type = %s",
                 (did, source_account_id, block_type)
             )
             result = cursor.fetchone()
@@ -158,7 +185,7 @@ class Database:
                 # For now, we will explicitly set is_synced to FALSE if the source_account_id is not primary
                 # and this is an update to an existing block. This ensures it gets picked up by primary sync if not already processed.
                 # This behavior might need refinement based on desired sync logic.
-                update_query = "UPDATE blocked_accounts SET handle = %s, reason = %s, last_seen = CURRENT_TIMESTAMP" 
+                update_query = f"UPDATE blocked_accounts{self.table_suffix} SET handle = %s, reason = %s, last_seen = CURRENT_TIMESTAMP" 
                 params = [handle, reason]
                 # If the source is not primary, and the block is updated, mark as unsynced for primary to re-check
                 if not source_is_primary:
@@ -171,7 +198,7 @@ class Database:
                 # New blocks from primary are considered synced with themselves by default.
                 is_synced_for_new_block = True if source_is_primary else False
                 cursor.execute(
-                    """INSERT INTO blocked_accounts 
+                    f"""INSERT INTO blocked_accounts{self.table_suffix} 
                     (did, handle, reason, source_account_id, block_type, is_synced)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     """,
@@ -192,13 +219,13 @@ class Database:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
             # First, let's log how many total block entries we have for debugging
-            cursor.execute("SELECT COUNT(*) as total_blocks FROM blocked_accounts WHERE block_type = 'blocking'")
+            cursor.execute(f"SELECT COUNT(*) as total_blocks FROM blocked_accounts{self.table_suffix} WHERE block_type = 'blocking'")
             total_blocks = cursor.fetchone()['total_blocks']
             logger.info(f"DB_SYNC: Found {total_blocks} total 'blocking' entries in the database")
             
             # Log raw data from blocked_accounts table for debugging
             logger.info(f"DB_SYNC: Fetching detailed block data for debugging...")
-            cursor.execute("SELECT * FROM blocked_accounts WHERE block_type = 'blocking' LIMIT 20")
+            cursor.execute(f"SELECT * FROM blocked_accounts{self.table_suffix} WHERE block_type = 'blocking' LIMIT 20")
             detailed_blocks = cursor.fetchall()
             for block in detailed_blocks:
                 logger.info(f"DB_SYNC: Block record - DID: {block.get('did', 'unknown')}, " 
@@ -207,20 +234,20 @@ class Database:
                           f"First seen: {block.get('first_seen', 'unknown')}")
             
             # Log how many blocks are from non-primary accounts
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT COUNT(*) as secondary_blocks 
-                FROM blocked_accounts ba
-                JOIN accounts a ON ba.source_account_id = a.id
+                FROM blocked_accounts{self.table_suffix} ba
+                JOIN accounts{self.table_suffix} a ON ba.source_account_id = a.id
                 WHERE a.is_primary = FALSE AND ba.block_type = 'blocking'
             """)
             secondary_blocks = cursor.fetchone()['secondary_blocks']
             logger.info(f"DB_SYNC: Found {secondary_blocks} 'blocking' entries from secondary accounts")
             
             # Log how many unsynced blocks we have
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT COUNT(*) as unsynced_blocks 
-                FROM blocked_accounts ba
-                JOIN accounts a ON ba.source_account_id = a.id
+                FROM blocked_accounts{self.table_suffix} ba
+                JOIN accounts{self.table_suffix} a ON ba.source_account_id = a.id
                 WHERE a.is_primary = FALSE AND ba.block_type = 'blocking' AND ba.is_synced = FALSE
             """)
             unsynced_blocks = cursor.fetchone()['unsynced_blocks']
@@ -232,161 +259,151 @@ class Database:
             # 2. The block type is 'blocking'
             # 3. This specific block entry hasn't been marked as synced
             # 4. We are NOT checking if primary already blocks this DID - we want to log that too
-            query = """
+            query = f"""
             SELECT ba.id, ba.did, ba.handle, a.handle as source_account_handle,
                    EXISTS (
                        SELECT 1
-                       FROM blocked_accounts primary_blocks
+                       FROM blocked_accounts{self.table_suffix} primary_blocks
                        WHERE primary_blocks.did = ba.did
                          AND primary_blocks.source_account_id = %s
                          AND primary_blocks.block_type = 'blocking'
                    ) as already_blocked_by_primary
-            FROM blocked_accounts ba
-            JOIN accounts a ON ba.source_account_id = a.id
+            FROM blocked_accounts{self.table_suffix} ba
+            JOIN accounts{self.table_suffix} a ON ba.source_account_id = a.id
             WHERE a.is_primary = FALSE                    -- Block is from a non-primary account
               AND ba.block_type = 'blocking'              -- It's a block action by that non-primary account
               AND ba.is_synced = FALSE                    -- The primary account hasn't processed this specific entry yet
             ORDER BY ba.first_seen ASC; -- Process older blocks first
             """
-            cursor.execute(query, (primary_account_id,))
-            results = cursor.fetchall()
             
-            # Log detailed info about what's being synced
-            if results:
-                for r in results:
-                    if r['already_blocked_by_primary']:
-                        logger.info(f"DB_SYNC: Found block for {r['handle']} ({r['did']}) that is already blocked by primary - will mark as synced")
-                    else:
-                        logger.info(f"DB_SYNC: Found block for {r['handle']} ({r['did']}) that needs to be blocked by primary")
-            else:
-                logger.info(f"DB_SYNC: No blocks from secondary accounts that need syncing")
-                
-            # Return only the ones not already blocked by primary
-            return [r for r in results if not r['already_blocked_by_primary']]
+            cursor.execute(query, (primary_account_id,))
+            blocks_to_sync = cursor.fetchall()
+            
+            # Let's log what we found for debugging
+            logger.info(f"DB_SYNC: Found {len(blocks_to_sync)} blocks that need to be synced by primary from non-primary accounts")
+            for block in blocks_to_sync:
+                already_blocked = "Already blocked by primary" if block['already_blocked_by_primary'] else "Not yet blocked by primary"
+                logger.info(f"DB_SYNC: Need to sync block - DID: {block['did']}, Handle: {block['handle']}, "
+                          f"Source Account: {block['source_account_handle']}, Status: {already_blocked}")
+            
+            return blocks_to_sync
         except Exception as e:
-            logger.error(f"Error getting unsynced blocks for primary {primary_account_id}: {e}")
+            logger.error(f"Error fetching unsynced blocks: {e}")
             raise
         finally:
             cursor.close()
             conn.close()
-
+    
     def mark_block_as_synced_by_primary(self, original_block_db_id, primary_account_id):
-        """Mark an original block (from a non-primary account) as synced by the primary account.
-           This sets the is_synced flag on the original block_accounts record to TRUE.
-        """
+        """Mark a block as synced by the primary account."""
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            # We also need to ensure that the primary account has indeed now blocked this DID.
-            # This function is called *after* the primary attempts the block.
-            # So, we just update the flag on the original record.
+            # Mark the original block entry as synced
             cursor.execute(
-                "UPDATE blocked_accounts SET is_synced = TRUE WHERE id = %s",
+                f"UPDATE blocked_accounts{self.table_suffix} SET is_synced = TRUE WHERE id = %s",
                 (original_block_db_id,)
             )
             conn.commit()
-            logger.debug(f"Marked original block ID {original_block_db_id} as synced by primary {primary_account_id}")
+            logger.info(f"DB_SYNC: Marked block ID {original_block_db_id} as synced by primary account ID {primary_account_id}")
+            return True
         except Exception as e:
             conn.rollback()
-            logger.error(f"Error marking block ID {original_block_db_id} as synced by primary {primary_account_id}: {e}")
+            logger.error(f"Error marking block as synced: {e}")
             raise
         finally:
             cursor.close()
             conn.close()
-
+    
     def get_all_blocked_accounts(self, unsynced_only=False):
-        """Get all unique DIDs and handles that are blocked by any managed account.
-           If unsynced_only is True, it returns those DIDs that have at least one 
-           'blocking' record by a non-primary account marked as is_synced = FALSE.
-           This method is more for general reporting or if other types of sync processes need it.
-        """
+        """Get all blocked accounts."""
         conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
+            query = f"""
+                SELECT 
+                    ba.did, 
+                    ba.handle, 
+                    ba.block_type,
+                    a.handle as source_account_handle,
+                    ba.is_synced
+                FROM blocked_accounts{self.table_suffix} ba
+                JOIN accounts{self.table_suffix} a ON ba.source_account_id = a.id
+            """
+            
             if unsynced_only:
-                # This will fetch DIDs that are marked as blocking by a non-primary account and are not yet synced.
-                # It's similar to get_unsynced_blocks_for_primary but doesn't exclude DIDs primary already blocks.
-                # It just indicates a DID needs *some* sync attention from primary for at least one of its non-primary block entries.
-                query = """
-                SELECT DISTINCT ba.did, ba.handle, a.handle as source_account_handle, a.id as source_account_id,
-                       ba.block_type, ba.is_synced, ba.reason, ba.first_seen, ba.last_seen 
-                FROM blocked_accounts ba
-                JOIN accounts a ON ba.source_account_id = a.id
-                WHERE a.is_primary = FALSE 
-                  AND ba.block_type = 'blocking' 
-                  AND ba.is_synced = FALSE;
-                """
-            else:
-                query = """
-                SELECT ba.did, ba.handle, a.handle as source_account_handle, a.id as source_account_id,
-                       ba.block_type, ba.is_synced, ba.reason, ba.first_seen, ba.last_seen
-                FROM blocked_accounts ba
-                JOIN accounts a ON ba.source_account_id = a.id
-                ORDER BY ba.first_seen DESC;
-                """
+                query += " WHERE ba.is_synced = FALSE"
+                
             cursor.execute(query)
             return cursor.fetchall()
         except Exception as e:
-            logger.error(f"Error getting all blocked accounts (unsynced_only={unsynced_only}): {e}")
+            logger.error(f"Error getting all blocked accounts: {e}")
             raise
         finally:
             cursor.close()
             conn.close()
     
     def mark_accounts_as_synced(self, dids, specific_source_account_id=None):
-        """Mark multiple accounts (by DID) as synced. 
-           If specific_source_account_id is provided, only marks records from that source as synced.
-           Otherwise, marks all 'blocking' records for these DIDs from non-primary accounts as synced.
-           This is a broad sync operation.
-        """
+        """Mark accounts as synced in the database."""
         if not dids:
             return
             
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            placeholders = ", ".join(["%s"] * len(dids))
-            query_base = f"UPDATE blocked_accounts SET is_synced = TRUE WHERE did IN ({placeholders}) AND block_type = 'blocking'"
-            params = list(dids)
-
             if specific_source_account_id:
-                query_base += " AND source_account_id = %s"
-                params.append(specific_source_account_id)
+                # Mark specific accounts as synced from a specific source account
+                # This is used when a secondary account tells us which accounts it's blocking
+                placeholder_string = ','.join(['%s'] * len(dids))
+                query = f"""
+                    UPDATE blocked_accounts{self.table_suffix}
+                    SET is_synced = TRUE
+                    WHERE did IN ({placeholder_string})
+                    AND source_account_id = %s
+                """
+                params = dids + [specific_source_account_id]
             else:
-                # If no specific source, mark as synced for all non-primary accounts that reported this block
-                query_base += " AND source_account_id IN (SELECT id FROM accounts WHERE is_primary = FALSE)"
-            
-            cursor.execute(query_base, tuple(params))
+                # Mark accounts as synced for all source accounts
+                # This is used when the primary account has synced blocks from secondary accounts
+                placeholder_string = ','.join(['%s'] * len(dids))
+                query = f"""
+                    UPDATE blocked_accounts{self.table_suffix}
+                    SET is_synced = TRUE
+                    WHERE did IN ({placeholder_string})
+                """
+                params = dids
+                
+            cursor.execute(query, params)
             conn.commit()
-            logger.info(f"Marked DIDs {dids} as synced (source_id: {specific_source_account_id if specific_source_account_id else 'all non-primary'}). Affected rows: {cursor.rowcount}")
+            logger.info(f"Marked {cursor.rowcount} blocked accounts as synced")
         except Exception as e:
             conn.rollback()
-            logger.error(f"Error marking accounts {dids} as synced: {e}")
+            logger.error(f"Error marking accounts as synced: {e}")
             raise
         finally:
             cursor.close()
             conn.close()
     
     def register_mod_list(self, list_uri, list_cid, owner_did, name):
-        """Register or update a moderation list."""
+        """Register a moderation list in the database."""
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            # Check if list already exists
-            cursor.execute("SELECT id FROM mod_lists WHERE list_uri = %s", (list_uri,))
+            # Check if mod list already exists
+            cursor.execute(f"SELECT id FROM mod_lists{self.table_suffix} WHERE list_uri = %s", (list_uri,))
             result = cursor.fetchone()
             
             if result:
-                # Update existing list
-                cursor.execute(
-                    "UPDATE mod_lists SET list_cid = %s, owner_did=%s, name=%s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-                    (list_cid, owner_did, name, result[0])
-                )
+                # Update existing mod list
                 list_id = result[0]
-            else:
-                # Insert new list
                 cursor.execute(
-                    "INSERT INTO mod_lists (list_uri, list_cid, owner_did, name) VALUES (%s, %s, %s, %s) RETURNING id",
+                    f"UPDATE mod_lists{self.table_suffix} SET list_cid = %s, owner_did = %s, name = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (list_cid, owner_did, name, list_id)
+                )
+            else:
+                # Insert new mod list
+                cursor.execute(
+                    f"INSERT INTO mod_lists{self.table_suffix} (list_uri, list_cid, owner_did, name) VALUES (%s, %s, %s, %s) RETURNING id",
                     (list_uri, list_cid, owner_did, name)
                 )
                 list_id = cursor.fetchone()[0]
@@ -395,114 +412,160 @@ class Database:
             return list_id
         except Exception as e:
             conn.rollback()
-            logger.error(f"Error registering moderation list {list_uri}: {e}")
+            logger.error(f"Error registering mod list {list_uri}: {e}")
             raise
         finally:
             cursor.close()
             conn.close()
-            
+    
     def remove_stale_blocks(self, source_account_id, block_type, current_dids):
-        """Remove blocks from the database that are no longer present in the current_dids list for a specific account and block_type."""
+        """Remove blocks that are no longer valid."""
+        if not current_dids:
+            logger.warning(f"No current DIDs provided for account ID {source_account_id} and block type {block_type}")
+            return
+            
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            if not current_dids: # If current_dids is empty, delete all for this source/type
-                logger.debug(f"current_dids is empty for source {source_account_id}, type {block_type}. Deleting all entries.")
-                cursor.execute(
-                    "DELETE FROM blocked_accounts WHERE source_account_id = %s AND block_type = %s",
-                    (source_account_id, block_type)
-                )
-            else:
-                placeholders = ", ".join(["%s"] * len(current_dids))
-                cursor.execute(
-                    f"DELETE FROM blocked_accounts WHERE source_account_id = %s AND block_type = %s AND did NOT IN ({placeholders})",
-                    [source_account_id, block_type] + current_dids # Parameters must be a list or tuple
-                )
+            # Prepare the placeholder string for the IN clause
+            placeholder_string = ','.join(['%s'] * len(current_dids))
+            
+            # Delete blocks that are not in the current list
+            query = f"""
+                DELETE FROM blocked_accounts{self.table_suffix}
+                WHERE source_account_id = %s
+                AND block_type = %s
+                AND did NOT IN ({placeholder_string})
+            """
+            params = [source_account_id, block_type] + current_dids
+            
+            cursor.execute(query, params)
+            deleted_count = cursor.rowcount
             conn.commit()
-            logger.debug(f"Removed stale blocks for source_account_id {source_account_id}, block_type {block_type}. Affected rows: {cursor.rowcount}")
+            
+            logger.info(f"Removed {deleted_count} stale blocks for account ID {source_account_id} with block type {block_type}")
         except Exception as e:
             conn.rollback()
-            logger.error(f"Error removing stale blocks for source_id {source_account_id}, type {block_type}: {e}")
+            logger.error(f"Error removing stale blocks for account ID {source_account_id}: {e}")
             raise
         finally:
             cursor.close()
             conn.close()
-
+    
     def get_last_firehose_cursor(self, account_did):
-        """Get the last processed firehose cursor for an account."""
+        """Get the last firehose cursor for an account."""
         conn = self.get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor = conn.cursor()
         try:
-            cursor.execute("SELECT last_firehose_cursor FROM accounts WHERE did = %s", (account_did,))
+            cursor.execute(f"SELECT last_firehose_cursor FROM accounts{self.table_suffix} WHERE did = %s", (account_did,))
             result = cursor.fetchone()
-            return result['last_firehose_cursor'] if result else None
+            return result[0] if result else None
         except Exception as e:
             logger.error(f"Error getting last firehose cursor for {account_did}: {e}")
             raise
         finally:
             cursor.close()
             conn.close()
-
+    
     def save_last_firehose_cursor(self, account_did, cursor_val):
-        """Save the last processed firehose cursor for an account."""
+        """Save the last firehose cursor for an account."""
+        if not cursor_val:
+            logger.warning(f"Attempted to save null cursor value for {account_did}")
+            return
+            
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "UPDATE accounts SET last_firehose_cursor = %s, updated_at = CURRENT_TIMESTAMP WHERE did = %s",
+                f"UPDATE accounts{self.table_suffix} SET last_firehose_cursor = %s WHERE did = %s",
                 (cursor_val, account_did)
             )
             conn.commit()
-            logger.debug(f"Saved last firehose cursor {cursor_val} for {account_did}")
+            logger.debug(f"Saved firehose cursor {cursor_val} for account {account_did}")
         except Exception as e:
             conn.rollback()
-            logger.error(f"Error saving last firehose cursor for {account_did}: {e}")
+            logger.error(f"Error saving firehose cursor for {account_did}: {e}")
             raise
         finally:
             cursor.close()
             conn.close()
-
+    
     def get_all_dids_primary_should_list(self, primary_account_id):
-        """
-        Get all unique DIDs that the primary account should have on its moderation list.
-        This includes:
-        1. DIDs directly blocked by the primary account itself ('blocking' type).
-        2. DIDs blocked by any secondary managed account ('blocking' type), 
-           which are not yet marked as handled/synced by the primary for list purposes.
-           Effectively, any 'blocking' record in the DB should be on the list.
-        """
+        """Get all DIDs that the primary account should include in its mod list."""
         conn = self.get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor = conn.cursor()
         try:
-            # This query aims to get all unique DIDs that are currently marked as 'blocking'
-            # by ANY of the managed accounts. The moderation list should reflect all such DIDs.
-            query = """
-            SELECT DISTINCT ba.did
-            FROM blocked_accounts ba
-            WHERE ba.block_type = 'blocking';
+            # Get all unique DIDs from both blocking and blocked_by types from all accounts
+            query = f"""
+            SELECT DISTINCT did FROM blocked_accounts{self.table_suffix}
+            WHERE 
+                -- We want all blocks made by all accounts (primary and non-primary)
+                (block_type = 'blocking')
+                
+                -- We also want accounts that are blocking any of our accounts
+                OR (block_type = 'blocked_by')
             """
-            # We don't strictly need primary_account_id for this version of the query,
-            # as the goal is to list *all* DIDs that *any* of our accounts are actively blocking.
-            # The primary account's list should be comprehensive.
+            
             cursor.execute(query)
             results = cursor.fetchall()
-            return results # Returns a list of RealDictRow objects, e.g., [{'did': 'did:plc:...'}]
+            
+            # Extract DIDs from results
+            dids = [row[0] for row in results]
+            
+            logger.info(f"Found {len(dids)} total unique DIDs that primary should include in mod list")
+            
+            return dids
         except Exception as e:
-            logger.error(f"Error getting all DIDs primary should list: {e}")
+            logger.error(f"Error getting DIDs for primary mod list: {e}")
             raise
         finally:
             cursor.close()
             conn.close()
-
+    
     def get_mod_lists_by_owner(self, owner_did):
         """Get moderation lists by owner DID."""
         conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
-            cursor.execute("SELECT * FROM mod_lists WHERE owner_did = %s", (owner_did,))
+            cursor.execute(f"SELECT * FROM mod_lists{self.table_suffix} WHERE owner_did = %s", (owner_did,))
             return cursor.fetchall()
         except Exception as e:
-            logger.error(f"Error getting moderation lists for owner {owner_did}: {e}")
+            logger.error(f"Error getting mod lists for owner {owner_did}: {e}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+    
+    def execute_query(self, query, params=None, commit=False):
+        """Execute a custom query and return results."""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            # Replace table names with their test or production versions
+            # This only handles explicitly named tables in the query
+            if self.table_suffix:
+                query = query.replace("accounts ", f"accounts{self.table_suffix} ")
+                query = query.replace("blocked_accounts ", f"blocked_accounts{self.table_suffix} ")
+                query = query.replace("mod_lists ", f"mod_lists{self.table_suffix} ")
+                
+                # Also handle table names at the end of the query
+                query = query.replace("accounts;", f"accounts{self.table_suffix};")
+                query = query.replace("blocked_accounts;", f"blocked_accounts{self.table_suffix};")
+                query = query.replace("mod_lists;", f"mod_lists{self.table_suffix};")
+            
+            cursor.execute(query, params or ())
+            
+            if commit:
+                conn.commit()
+                return cursor.rowcount
+            
+            return cursor.fetchall()
+        except Exception as e:
+            if commit:
+                conn.rollback()
+            logger.error(f"Error executing query: {e}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Params: {params}")
             raise
         finally:
             cursor.close()

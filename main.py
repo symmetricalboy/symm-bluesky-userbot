@@ -12,6 +12,7 @@ from account_agent import AccountAgent, CLEARSKY_API_BASE_URL
 from setup_db import setup_database
 from database import Database
 from test_mod_list_sync import sync_mod_list_from_db
+import clearsky_helpers as cs
 
 # Load environment variables
 load_dotenv()
@@ -344,44 +345,83 @@ async def populate_blocks_from_clearsky():
         
         logger.info(f"Getting blocks for {account_handle} ({account_did})...")
         
-        # Get blocks from ClearSky
-        blocks = await get_blocks_from_clearsky(account_did)
+        # Process who this account is blocking
+        logger.info(f"Fetching who {account_handle} is blocking...")
+        try:
+            # Get blocks from standard ClearSky endpoint
+            blocking_data = await fetch_from_clearsky(f"/blocklist/{account_did}")
+            if blocking_data and 'data' in blocking_data and 'blocklist' in blocking_data['data']:
+                blocklist = blocking_data['data']['blocklist']
+                if blocklist:
+                    logger.info(f"Found {len(blocklist)} accounts being blocked by {account_handle}")
+                    
+                    # Add 'blocking' relationships to database
+                    for block_info in blocklist:
+                        blocked_did = block_info.get('did')
+                        blocked_handle = DID_TO_HANDLE.get(blocked_did, "unknown")  # Use known handle if available
+                        
+                        try:
+                            db.add_blocked_account(
+                                did=blocked_did,
+                                handle=blocked_handle,
+                                source_account_id=account_id,
+                                block_type='blocking',
+                                reason="Imported from ClearSky"
+                            )
+                            logger.debug(f"Added blocking relationship: {account_handle} blocks {blocked_did}")
+                        except Exception as e:
+                            logger.error(f"Error adding blocking relationship: {e}")
+                else:
+                    logger.info(f"No accounts being blocked by {account_handle}")
+        except Exception as e:
+            logger.error(f"Error fetching who {account_handle} is blocking: {e}")
         
-        # Add 'blocking' relationships to database
-        logger.info(f"Adding {len(blocks['blocking'])} 'blocking' relationships for {account_handle}...")
-        for block_info in blocks['blocking']:
-            blocked_did = block_info.get('did')
-            blocked_handle = DID_TO_HANDLE.get(blocked_did, "unknown")  # Use known handle if available
+        # Process who is blocking this account using our improved pagination helper
+        logger.info(f"Fetching who is blocking {account_handle} with pagination support...")
+        try:
+            # Use our enhanced pagination-aware helper
+            start_time = datetime.now()
+            blockers, total_count = await cs.fetch_all_blocked_by(account_did)
             
-            try:
-                db.add_blocked_account(
-                    did=blocked_did,
-                    handle=blocked_handle,
-                    source_account_id=account_id,
-                    block_type='blocking',
-                    reason="Imported from ClearSky"
-                )
-                logger.info(f"Added blocking relationship: {account_handle} blocks {blocked_did}")
-            except Exception as e:
-                logger.error(f"Error adding blocking relationship: {e}")
-        
-        # Add 'blocked_by' relationships to database
-        logger.info(f"Adding {len(blocks['blocked_by'])} 'blocked_by' relationships for {account_handle}...")
-        for block_info in blocks['blocked_by']:
-            blocker_did = block_info.get('did')
-            blocker_handle = DID_TO_HANDLE.get(blocker_did, "unknown")  # Use known handle if available
-            
-            try:
-                db.add_blocked_account(
-                    did=blocker_did,
-                    handle=blocker_handle,
-                    source_account_id=account_id,
-                    block_type='blocked_by',
-                    reason="Imported from ClearSky"
-                )
-                logger.info(f"Added blocked_by relationship: {account_handle} is blocked by {blocker_did}")
-            except Exception as e:
-                logger.error(f"Error adding blocked_by relationship: {e}")
+            if blockers:
+                logger.info(f"Found {len(blockers)} accounts blocking {account_handle}")
+                
+                # Process the blocked-by records and track for duplicate checking
+                processed_dids = set()
+                
+                for blocker in blockers:
+                    if 'did' not in blocker:
+                        logger.warning(f"Skipping blocked-by record missing DID: {blocker}")
+                        continue
+                        
+                    blocker_did = blocker['did']
+                    
+                    # Skip if we've already processed this DID (handle duplicates)
+                    if blocker_did in processed_dids:
+                        logger.debug(f"Skipping duplicate DID: {blocker_did}")
+                        continue
+                        
+                    processed_dids.add(blocker_did)
+                    blocker_handle = DID_TO_HANDLE.get(blocker_did, "unknown")  # Use known handle if available
+                    
+                    try:
+                        db.add_blocked_account(
+                            did=blocker_did,
+                            handle=blocker_handle,
+                            source_account_id=account_id,
+                            block_type='blocked_by',
+                            reason="Imported from ClearSky"
+                        )
+                        logger.debug(f"Added blocked_by relationship: {account_handle} is blocked by {blocker_did}")
+                    except Exception as e:
+                        logger.error(f"Error adding blocked_by relationship: {e}")
+                
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+                logger.info(f"Processed {len(processed_dids)} unique blocked-by DIDs in {elapsed_time:.2f} seconds")
+            else:
+                logger.info(f"No accounts blocking {account_handle}")
+        except Exception as e:
+            logger.error(f"Error fetching who is blocking {account_handle}: {e}")
         
         # Rate limiting
         await asyncio.sleep(1)
@@ -527,12 +567,75 @@ async def run_diagnostics():
     root_logger.addHandler(file_handler)
     
     try:
-        # Import and run the diagnostics
-        import test_direct_db
-        test_direct_db.run_diagnostics()
-        logger.info("Database diagnostics completed successfully.")
+        # Initialize database for queries
+        db = Database()
+        if not db.test_connection():
+            logger.error("Database connection test failed. Cannot run diagnostics.")
+            return False
+        
+        # 1. Import and run the standard diagnostics
+        try:
+            import test_direct_db
+            test_direct_db.run_diagnostics()
+            logger.info("Database diagnostics completed successfully.")
+        except Exception as e:
+            logger.error(f"Database diagnostics failed: {e}")
+        
+        # 2. Check for duplicate DIDs in the database
+        try:
+            logger.info("Checking for duplicate DIDs in the database...")
+            # Execute custom query to find duplicate DIDs
+            query = """
+                SELECT did, block_type, COUNT(*) as count
+                FROM blocked_accounts
+                GROUP BY did, block_type, source_account_id
+                HAVING COUNT(*) > 1
+            """
+            results = db.execute_query(query)
+            
+            if results and len(results) > 0:
+                logger.warning(f"Found {len(results)} instances of duplicate DIDs in the database!")
+                for row in results:
+                    logger.warning(f"Duplicate found: DID {row['did']}, Type: {row['block_type']}, Count: {row['count']}")
+                
+                # Log this to a special file for further investigation
+                with open(f"duplicate_dids_check_{timestamp}.log", "w") as dup_file:
+                    dup_file.write(f"Duplicate DIDs check run at {timestamp}\n")
+                    dup_file.write(f"Found {len(results)} instances of duplicate DIDs\n\n")
+                    for row in results:
+                        dup_file.write(f"DID: {row['did']}, Type: {row['block_type']}, Count: {row['count']}\n")
+                    
+                logger.info(f"Detailed duplicate DID information saved to duplicate_dids_check_{timestamp}.log")
+                
+                # Try to run the deduplication script if available
+                try:
+                    import check_duplicate_dids
+                    logger.info("Running duplicate DID check and cleanup...")
+                    await check_duplicate_dids.main()
+                except ImportError:
+                    logger.warning("check_duplicate_dids.py not found. Skipping automatic deduplication.")
+                except Exception as e_dedup:
+                    logger.error(f"Error running duplicate DID check and cleanup: {e_dedup}")
+            else:
+                logger.info("No duplicate DIDs found in the database.")
+        except Exception as e_dup:
+            logger.error(f"Error checking for duplicate DIDs: {e_dup}")
+        
+        # 3. Check ClearSky API health
+        try:
+            logger.info("Checking ClearSky API health...")
+            url = f"{CLEARSKY_API_BASE_URL}/lists/fun-facts"
+            
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                response = await client.get(url)
+                if response.status_code == 200:
+                    logger.info("ClearSky API connection successful")
+                else:
+                    logger.error(f"ClearSky API returned status code {response.status_code}")
+        except Exception as e_api:
+            logger.error(f"Error connecting to ClearSky API: {e_api}")
     except Exception as e:
-        logger.error(f"Database diagnostics failed: {e}")
+        logger.error(f"General error during diagnostics: {e}")
     finally:
         # Remove the file handler
         root_logger.removeHandler(file_handler)

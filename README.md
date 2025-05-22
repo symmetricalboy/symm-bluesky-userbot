@@ -10,6 +10,15 @@ A userbot for Bluesky that handles block synchronization between multiple accoun
 - Initializes block data from ClearSky API
 - Persists block information in a PostgreSQL database
 
+## Recent Improvements
+
+- **Enhanced ClearSky API Pagination**: Added robust pagination support to handle large sets of blocked accounts (up to thousands of accounts)
+- **Duplicate DID Detection and Cleanup**: Added system to detect and eliminate duplicate DIDs in the database
+- **Scheduled Full Synchronization**: Full ClearSky sync runs every 24 hours, with regular Bluesky API checks in between
+- **Real-time Jetstream Monitoring**: Monitors the Bluesky firehose for new blocks in real-time
+- **Comprehensive Error Handling**: Improved error handling and logging for better diagnostics
+- **Performance Optimizations**: Reduced API calls and improved database interaction efficiency
+
 ## Setup
 
 1. Clone this repository

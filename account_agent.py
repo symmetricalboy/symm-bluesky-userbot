@@ -3,6 +3,7 @@ import asyncio
 import logging
 import httpx
 from atproto import AsyncClient as ATProtoAsyncClient
+from atproto import AsyncFirehoseSubscribeReposClient
 from atproto_client.models.app.bsky.graph.list import Record as ListRecord
 from atproto_client.models.app.bsky.graph.listitem import Record as ListItemRecord
 from atproto_client.models.app.bsky.graph.block import Record as BlockRecord
@@ -12,13 +13,21 @@ from atproto_client.models.com.atproto.repo.put_record import Data as PutRecordD
 from atproto_client.models.com.atproto.repo.create_record import Data as CreateRecordData
 from atproto_client.models.com.atproto.sync.subscribe_repos import Commit as FirehoseCommitModel
 
-from atproto_firehose import AsyncFirehoseSubscribeReposClient
-from atproto_firehose.models import MessageFrame
+# Fix MessageFrame import
+try:
+    from atproto import MessageFrame
+except ImportError:
+    # If MessageFrame is not available, define a placeholder
+    class MessageFrame:
+        pass
+
 from atproto_core.car import CAR
 import cbor2
 from database import Database
 from test_mod_list_sync import sync_mod_list_from_db
-import time 
+import time
+from datetime import datetime, timedelta
+import clearsky_helpers as cs 
 
 # Set up logging
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -36,10 +45,12 @@ CLEARSKY_API_BASE_URL = os.getenv('CLEARSKY_API_URL', 'https://api.clearsky.serv
 CLEARSKY_REQUEST_DELAY = 1.0  # 1 request per second, down from 4 req/sec to avoid rate limiting
 
 # Firehose constants
-FIREHOSE_HOST = "jetstream.atproto.tools" 
+FIREHOSE_HOST = "bsky.network" # Updated to standard endpoint
 FIREHOSE_PORT = 443 # Default HTTPS/WSS port
 FIREHOSE_SSL = True
 
+# Full synchronization schedule
+FULL_SYNC_INTERVAL_HOURS = int(os.getenv('FULL_SYNC_INTERVAL_HOURS', '24'))
 
 class AccountAgent:
     def __init__(self, handle, password, is_primary=False, database=None):
@@ -203,7 +214,7 @@ class AccountAgent:
             logger.debug(f"Account {self.handle} is not primary, not adding {blocked_did} to any mod list itself.")
 
 
-    async def _firehose_message_handler(self, message: MessageFrame) -> bool:
+    async def _firehose_message_handler(self, message) -> bool:
         if self._firehose_stop_event.is_set():
             logger.info(f"FIREHOSE_HANDLER ({self.did}): Stop event set, exiting message processing loop.")
             return True # Signal to stop
@@ -331,11 +342,16 @@ class AccountAgent:
         firehose_client = None # Initialize to ensure it's in scope for finally block
         try:
             logger.info(f"DEBUG_PROBE: sync_blocks_with_firehose - About to initialize AsyncFirehoseSubscribeReposClient for {self.handle}") # ADDED DEBUG PROBE
-            logger.info(f"FIREHOSE_SYNC ({self.did}): Initializing AsyncFirehoseSubscribeReposClient. Host: {FIREHOSE_HOST}, Cursor: {cursor_val}")
+            logger.info(f"FIREHOSE_SYNC ({self.did}): Initializing AsyncFirehoseSubscribeReposClient. Cursor: {cursor_val}")
+            
+            # Create parameters with the cursor
+            params = {"cursor": cursor_val} if cursor_val is not None else None
+            
             firehose_client = AsyncFirehoseSubscribeReposClient(
-                cursor=cursor_val,
-                host=FIREHOSE_HOST
+                params=params,
+                base_uri=f"wss://{FIREHOSE_HOST}/xrpc/com.atproto.sync.subscribeRepos"
             )
+            
             logger.info(f"FIREHOSE_SYNC ({self.did}): Firehose client initialized. Attempting to connect and start listening...")
             logger.info(f"DEBUG_PROBE: sync_blocks_with_firehose - About to call firehose_client.start() for {self.handle}") # ADDED DEBUG PROBE
             # The start method blocks until an error or graceful stop
@@ -438,7 +454,46 @@ class AccountAgent:
         logger.info(f"MONITORING ({self.handle}): All monitoring tasks stopped and cleared.")
 
     async def _fetch_paginated_clearsky_list(self, endpoint_template: str):
+        """
+        Fetch a paginated list from ClearSky API
+        
+        Args:
+            endpoint_template: The API endpoint template with {did} placeholder
+            
+        Returns:
+            List of DIDs from all pages
+        """
         logger.debug(f"CLEARSKY_FETCH ({self.did}): Starting paginated fetch for endpoint template: {endpoint_template}")
+        
+        # Extract the endpoint type to determine which helper function to use
+        if "/single-blocklist/" in endpoint_template:
+            # Use the improved pagination handler for blocked-by lists
+            logger.info(f"CLEARSKY_FETCH ({self.did}): Using enhanced pagination for blocked-by accounts")
+            
+            # Get the formatted endpoint
+            formatted_endpoint = endpoint_template.replace("{did}", self.did)
+            handle_or_did = self.did
+            
+            try:
+                # First get the total count for logging purposes
+                total_count = await cs.get_total_blocked_by_count(handle_or_did)
+                if total_count is not None:
+                    logger.info(f"CLEARSKY_FETCH ({self.did}): Found {total_count} total accounts in list")
+                
+                # Fetch all pages with our improved pagination handling
+                blockers, fetched_count = await cs.fetch_all_blocked_by(handle_or_did)
+                
+                # Extract just the DIDs from the blocker records
+                all_dids = [blocker['did'] for blocker in blockers if 'did' in blocker]
+                
+                logger.info(f"CLEARSKY_FETCH ({self.did}): Successfully fetched {len(all_dids)} DIDs using enhanced pagination")
+                return all_dids
+            except Exception as e:
+                logger.error(f"CLEARSKY_FETCH ({self.did}): Error using enhanced pagination: {e}", exc_info=True)
+                logger.warning(f"CLEARSKY_FETCH ({self.did}): Falling back to original pagination method")
+                # Fall back to original implementation
+        
+        # Original implementation for other endpoints or as fallback
         all_dids = []
         page = 1
         max_pages = 500 
@@ -852,16 +907,71 @@ class AccountAgent:
             return False
 
     async def sync_all_account_data(self, initial_sync=False):
-        """Synchronize all data for this account"""
+        """
+        Synchronize all data for this account
+        
+        Args:
+            initial_sync: If True, perform a full sync including ClearSky data
+        """
         if self._blocks_monitor_stop_event.is_set():
             logger.info(f"BLOCKS_MONITOR ({self.handle}): Stop event set, skipping full sync")
             return
             
-        logger.info(f"BLOCKS_MONITOR ({self.handle}): Running full account data sync for {self.handle} (initial_sync={initial_sync})...")
+        logger.info(f"BLOCKS_MONITOR ({self.handle}): Running {'full' if initial_sync else 'regular'} account data sync for {self.handle}...")
         
         try:
-            # First, fetch blocks from Bluesky API
+            # Always fetch blocks from Bluesky API
+            logger.info(f"BLOCKS_MONITOR ({self.handle}): Fetching current blocks from Bluesky API...")
             await self.fetch_bluesky_blocks()
+            
+            # If this is an initial sync or full sync, fetch blocked-by accounts from ClearSky
+            if initial_sync:
+                logger.info(f"BLOCKS_MONITOR ({self.handle}): Fetching accounts that block this account from ClearSky...")
+                try:
+                    start_time = time.time()
+                    
+                    # Use our enhanced pagination-aware helper
+                    logger.info(f"BLOCKS_MONITOR ({self.handle}): Using enhanced pagination for blocked-by accounts")
+                    blockers, total_count = await cs.fetch_all_blocked_by(self.did)
+                    
+                    # Process the blocked-by records
+                    logger.info(f"BLOCKS_MONITOR ({self.handle}): Processing {len(blockers)} blocked-by records from ClearSky")
+                    processed_dids = set()  # To track DIDs we've already processed
+                    
+                    for blocker in blockers:
+                        if 'did' not in blocker:
+                            logger.warning(f"BLOCKS_MONITOR ({self.handle}): Skipping blocked-by record missing DID: {blocker}")
+                            continue
+                            
+                        did = blocker['did']
+                        
+                        # Skip if we've already processed this DID (handle duplicates)
+                        if did in processed_dids:
+                            logger.debug(f"BLOCKS_MONITOR ({self.handle}): Skipping duplicate DID: {did}")
+                            continue
+                            
+                        processed_dids.add(did)
+                        
+                        try:
+                            # Add to database
+                            self.database.add_blocked_account(
+                                did=did, 
+                                handle=None,  # Handle can be resolved later if needed
+                                source_account_id=self.account_id, 
+                                block_type='blocked_by'
+                            )
+                        except Exception as e:
+                            logger.error(f"BLOCKS_MONITOR ({self.handle}): Error adding blocked-by DID {did} to DB: {e}", exc_info=True)
+                    
+                    # Remove stale entries
+                    logger.info(f"BLOCKS_MONITOR ({self.handle}): Removing stale blocked-by entries from DB...")
+                    self.database.remove_stale_blocks(self.account_id, 'blocked_by', list(processed_dids))
+                    
+                    elapsed_time = time.time() - start_time
+                    logger.info(f"BLOCKS_MONITOR ({self.handle}): Processed {len(processed_dids)} unique blocked-by DIDs in {elapsed_time:.2f} seconds")
+                    
+                except Exception as e:
+                    logger.error(f"BLOCKS_MONITOR ({self.handle}): Error fetching or processing blocked-by accounts: {e}", exc_info=True)
             
             # Only primary accounts do these operations
             if self.is_primary:
@@ -875,23 +985,29 @@ class AccountAgent:
                 # Sync moderation list with the database (ensures all blocks are reflected in mod list)
                 await self.sync_mod_list_with_database()
             
-            logger.info(f"BLOCKS_MONITOR ({self.handle}): Full account data sync completed for {self.handle}")
+            logger.info(f"BLOCKS_MONITOR ({self.handle}): {'Full' if initial_sync else 'Regular'} account data sync completed for {self.handle}")
         except Exception as e:
-            logger.error(f"BLOCKS_MONITOR ({self.handle}): Error during full account data sync: {e}", exc_info=True)
+            logger.error(f"BLOCKS_MONITOR ({self.handle}): Error during {'full' if initial_sync else 'regular'} account data sync: {e}", exc_info=True)
 
     async def _blocks_monitor_loop(self):
         sync_interval_primary_min = int(os.getenv('SYNC_INTERVAL_PRIMARY_MINUTES', 15))
         sync_interval_secondary_min = int(os.getenv('SYNC_INTERVAL_SECONDARY_MINUTES', 60))
         
         sync_interval_seconds = (sync_interval_primary_min if self.is_primary else sync_interval_secondary_min) * 60
+        
+        # Track when the last full ClearSky sync was performed
+        last_full_clearsky_sync = datetime.now() - timedelta(hours=FULL_SYNC_INTERVAL_HOURS + 1)  # Force an initial full sync
 
         logger.info(f"LEGACY_MONITOR ({self.handle}): Performing initial data sync cycle as part of loop startup...")
         try:
+            # Set initial_sync=True to perform a complete sync, including ClearSky data
             await self.sync_all_account_data(initial_sync=True) 
+            last_full_clearsky_sync = datetime.now()  # Update after successful sync
+            logger.info(f"LEGACY_MONITOR ({self.handle}): Initial full sync completed. Next full ClearSky sync scheduled for {last_full_clearsky_sync + timedelta(hours=FULL_SYNC_INTERVAL_HOURS)}")
         except Exception as e_initial_sync:
             logger.error(f"LEGACY_MONITOR ({self.handle}): Error during initial data sync in monitor loop: {e_initial_sync}", exc_info=True)
         
-        logger.info(f"LEGACY_MONITOR ({self.handle}): Loop started. Will run full sync (excluding direct API blocks after initial) every {sync_interval_seconds // 60} minutes.")
+        logger.info(f"LEGACY_MONITOR ({self.handle}): Loop started. Will run regular sync every {sync_interval_seconds // 60} minutes, and full ClearSky sync every {FULL_SYNC_INTERVAL_HOURS} hours.")
         self._blocks_monitor_stop_event.clear()
 
         while not self._blocks_monitor_stop_event.is_set():
@@ -905,11 +1021,26 @@ class AccountAgent:
                     break 
             except asyncio.TimeoutError:
                 # Timeout means stop event was not set, time to sync
-                logger.info(f"LEGACY_MONITOR ({self.handle}): Interval reached. Performing scheduled data sync cycle...")
-                try:
-                    await self.sync_all_account_data(initial_sync=False) # Subsequent syncs are not "initial"
-                except Exception as e_scheduled_sync:
-                    logger.error(f"LEGACY_MONITOR ({self.handle}): Error during scheduled sync: {e_scheduled_sync}", exc_info=True)
+                now = datetime.now()
+                time_since_full_sync = now - last_full_clearsky_sync
+                needs_full_clearsky_sync = time_since_full_sync.total_seconds() >= FULL_SYNC_INTERVAL_HOURS * 3600
+                
+                if needs_full_clearsky_sync:
+                    logger.info(f"LEGACY_MONITOR ({self.handle}): {FULL_SYNC_INTERVAL_HOURS} hours since last full sync. Performing full ClearSky data sync...")
+                    try:
+                        # Run a complete sync including ClearSky data
+                        await self.sync_all_account_data(initial_sync=True)
+                        last_full_clearsky_sync = now
+                        logger.info(f"LEGACY_MONITOR ({self.handle}): Full ClearSky sync completed. Next full sync scheduled for {last_full_clearsky_sync + timedelta(hours=FULL_SYNC_INTERVAL_HOURS)}")
+                    except Exception as e_full_sync:
+                        logger.error(f"LEGACY_MONITOR ({self.handle}): Error during full ClearSky sync: {e_full_sync}", exc_info=True)
+                else:
+                    logger.info(f"LEGACY_MONITOR ({self.handle}): Performing regular sync cycle (next full ClearSky sync in {FULL_SYNC_INTERVAL_HOURS - (time_since_full_sync.total_seconds() / 3600):.1f} hours)...")
+                    try:
+                        # Run a regular sync without ClearSky data
+                        await self.sync_all_account_data(initial_sync=False)
+                    except Exception as e_regular_sync:
+                        logger.error(f"LEGACY_MONITOR ({self.handle}): Error during regular sync: {e_regular_sync}", exc_info=True)
             except asyncio.CancelledError:
                 logger.info(f"LEGACY_MONITOR ({self.handle}): Loop was cancelled.")
                 break
