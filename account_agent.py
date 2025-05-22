@@ -3,9 +3,9 @@ import asyncio
 import logging
 import httpx
 from atproto import AsyncClient as ATProtoAsyncClient
-from atproto_client.models.app.bsky.graph.list import Main as ListRecord
-from atproto_client.models.app.bsky.graph.listitem import Main as ListItemRecord
-from atproto_client.models.app.bsky.graph.block import Main as BlockRecord
+from atproto_client.models.app.bsky.graph.list import Record as ListRecord
+from atproto_client.models.app.bsky.graph.listitem import Record as ListItemRecord
+from atproto_client.models.app.bsky.graph.block import Record as BlockRecord
 from atproto_client.models.app.bsky.graph.get_blocks import Params as GetBlocksParams
 from atproto_client.models.app.bsky.graph.get_list import Params as GetListParams
 from atproto_client.models.com.atproto.sync.subscribe_repos import Commit as FirehoseCommitModel
