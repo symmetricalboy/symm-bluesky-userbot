@@ -545,6 +545,7 @@ class AccountAgent:
         cursor = None
         max_attempts = 3
         attempt_delay = 1 # seconds
+        blocks_found = 0  # Counter for debugging
 
         for attempt in range(max_attempts):
             try:
@@ -553,7 +554,14 @@ class AccountAgent:
                 response = await self.client.app.bsky.graph.get_blocks(params=params)
                 
                 if response and response.blocks:
-                    logger.info(f"BLUESKY_API_SYNC ({self.handle}): Fetched {len(response.blocks)} blocks in this page.")
+                    blocks_count = len(response.blocks)
+                    blocks_found += blocks_count
+                    logger.info(f"BLUESKY_API_SYNC ({self.handle}): Fetched {blocks_count} blocks in this page.")
+                    
+                    # Log the first few blocks for debugging
+                    for i, block_view in enumerate(response.blocks[:5]):  # Log only first 5 blocks for brevity
+                        logger.info(f"BLUESKY_API_SYNC ({self.handle}): Block {i+1}: DID={block_view.did}, Handle={block_view.handle}")
+                    
                     for block_view in response.blocks:
                         blocked_accounts_dids.append(block_view.did)
                         # This add_blocked_account should also be idempotent or handle conflicts
@@ -562,7 +570,6 @@ class AccountAgent:
                             source_account_id=self.account_id, block_type='blocking',
                             reason="Fetched via Bluesky API get_blocks" 
                         )
-                        # logger.debug(f"BLUESKY_API_SYNC ({self.handle}): Processed block for {block_view.did} into DB.")
                 else:
                     logger.debug(f"BLUESKY_API_SYNC ({self.handle}): No blocks in this page or empty response.")
 
@@ -581,7 +588,13 @@ class AccountAgent:
                 await asyncio.sleep(attempt_delay)
                 attempt_delay *= 2 # Exponential backoff
         
-        logger.info(f"BLUESKY_API_SYNC ({self.handle}): Found {len(blocked_accounts_dids)} total accounts being blocked by this account via API.")
+        logger.info(f"BLUESKY_API_SYNC ({self.handle}): Found {len(blocked_accounts_dids)} total accounts being blocked by this account via API ({blocks_found} blocks fetched across all pages).")
+        
+        if len(blocked_accounts_dids) > 0:
+            logger.info(f"BLUESKY_API_SYNC ({self.handle}): Successfully fetched and stored {len(blocked_accounts_dids)} blocks for account {self.handle}")
+        else:
+            logger.warning(f"BLUESKY_API_SYNC ({self.handle}): No blocks found for account {self.handle}. This may be expected if the account has no blocks.")
+            
         logger.debug(f"BLUESKY_API_SYNC ({self.handle}): Removing stale 'blocking' entries from DB (initial sync reconciliation)...")
         self.database.remove_stale_blocks(self.account_id, 'blocking', blocked_accounts_dids) # For initial sync, ensure DB reflects API state
         logger.info(f"BLUESKY_API_SYNC ({self.handle}): Finished fetching and processing blocks from Bluesky API.")
@@ -593,6 +606,28 @@ class AccountAgent:
             return
 
         logger.info(f"PRIMARY_SYNC ({self.handle}): Syncing blocks from other managed (secondary) accounts to this primary account...")
+        
+        # Add debug logging to see if there are any blocked accounts in the database
+        try:
+            blocked_accounts = self.database.get_all_blocked_accounts()
+            logger.info(f"PRIMARY_SYNC ({self.handle}): Database contains {len(blocked_accounts)} total blocked accounts records (including all accounts and types)")
+            
+            # Get the total number of blocked DIDs to help with debugging
+            unique_dids = set(record['did'] for record in blocked_accounts if record.get('did'))
+            logger.info(f"PRIMARY_SYNC ({self.handle}): Database contains {len(unique_dids)} unique DIDs being blocked by all accounts")
+            
+            # List secondary accounts for debugging
+            secondary_accounts = self.database.get_secondary_accounts()
+            if secondary_accounts:
+                logger.info(f"PRIMARY_SYNC ({self.handle}): Found {len(secondary_accounts)} secondary accounts in database")
+                for acct in secondary_accounts:
+                    logger.info(f"PRIMARY_SYNC ({self.handle}): Secondary account: {acct.get('handle', 'unknown')} (DID: {acct.get('did', 'unknown')})")
+            else:
+                logger.warning(f"PRIMARY_SYNC ({self.handle}): No secondary accounts found in database!")
+        except Exception as e:
+            logger.error(f"PRIMARY_SYNC ({self.handle}): Error getting debug info: {e}", exc_info=True)
+        
+        # Continue with normal sync logic
         unsynced_entries = self.database.get_unsynced_blocks_for_primary(self.account_id)
         
         if not unsynced_entries:

@@ -121,6 +121,20 @@ class Database:
             cursor.close()
             conn.close()
     
+    def get_secondary_accounts(self):
+        """Get all secondary (non-primary) accounts."""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("SELECT * FROM accounts WHERE is_primary = FALSE ORDER BY id")
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Error getting secondary accounts: {e}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+    
     def add_blocked_account(self, did, handle, source_account_id, block_type, reason=None):
         """Add or update a blocked account in the database. Reset is_synced to FALSE on update if it's a non-primary block."""
         conn = self.get_connection()
@@ -177,6 +191,31 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
+            # First, let's log how many total block entries we have for debugging
+            cursor.execute("SELECT COUNT(*) as total_blocks FROM blocked_accounts WHERE block_type = 'blocking'")
+            total_blocks = cursor.fetchone()['total_blocks']
+            logger.info(f"DB_SYNC: Found {total_blocks} total 'blocking' entries in the database")
+            
+            # Log how many blocks are from non-primary accounts
+            cursor.execute("""
+                SELECT COUNT(*) as secondary_blocks 
+                FROM blocked_accounts ba
+                JOIN accounts a ON ba.source_account_id = a.id
+                WHERE a.is_primary = FALSE AND ba.block_type = 'blocking'
+            """)
+            secondary_blocks = cursor.fetchone()['secondary_blocks']
+            logger.info(f"DB_SYNC: Found {secondary_blocks} 'blocking' entries from secondary accounts")
+            
+            # Log how many unsynced blocks we have
+            cursor.execute("""
+                SELECT COUNT(*) as unsynced_blocks 
+                FROM blocked_accounts ba
+                JOIN accounts a ON ba.source_account_id = a.id
+                WHERE a.is_primary = FALSE AND ba.block_type = 'blocking' AND ba.is_synced = FALSE
+            """)
+            unsynced_blocks = cursor.fetchone()['unsynced_blocks']
+            logger.info(f"DB_SYNC: Found {unsynced_blocks} unsynced 'blocking' entries from secondary accounts")
+            
             # Modified query that finds all blocks from non-primary accounts that should be synced
             # We want all blocks from secondary accounts where:
             # 1. The account is not the primary account
@@ -184,7 +223,7 @@ class Database:
             # 3. This specific block entry hasn't been marked as synced
             # 4. We are NOT checking if primary already blocks this DID - we want to log that too
             query = """
-            SELECT ba.id, ba.did, ba.handle, 
+            SELECT ba.id, ba.did, ba.handle, a.handle as source_account_handle,
                    EXISTS (
                        SELECT 1
                        FROM blocked_accounts primary_blocks
@@ -206,11 +245,11 @@ class Database:
             if results:
                 for r in results:
                     if r['already_blocked_by_primary']:
-                        logger.info(f"Found block for {r['handle']} ({r['did']}) that is already blocked by primary - will mark as synced")
+                        logger.info(f"DB_SYNC: Found block for {r['handle']} ({r['did']}) that is already blocked by primary - will mark as synced")
                     else:
-                        logger.info(f"Found block for {r['handle']} ({r['did']}) that needs to be blocked by primary")
+                        logger.info(f"DB_SYNC: Found block for {r['handle']} ({r['did']}) that needs to be blocked by primary")
             else:
-                logger.info(f"No blocks from secondary accounts that need syncing")
+                logger.info(f"DB_SYNC: No blocks from secondary accounts that need syncing")
                 
             # Return only the ones not already blocked by primary
             return [r for r in results if not r['already_blocked_by_primary']]
@@ -259,7 +298,8 @@ class Database:
                 # It's similar to get_unsynced_blocks_for_primary but doesn't exclude DIDs primary already blocks.
                 # It just indicates a DID needs *some* sync attention from primary for at least one of its non-primary block entries.
                 query = """
-                SELECT DISTINCT ba.did, ba.handle 
+                SELECT DISTINCT ba.did, ba.handle, a.handle as source_account_handle, a.id as source_account_id,
+                       ba.block_type, ba.is_synced, ba.reason, ba.first_seen, ba.last_seen 
                 FROM blocked_accounts ba
                 JOIN accounts a ON ba.source_account_id = a.id
                 WHERE a.is_primary = FALSE 
@@ -268,9 +308,11 @@ class Database:
                 """
             else:
                 query = """
-                SELECT DISTINCT did, handle 
-                FROM blocked_accounts
-                WHERE block_type = 'blocking'; -- Typically we care about who is being actively blocked
+                SELECT ba.did, ba.handle, a.handle as source_account_handle, a.id as source_account_id,
+                       ba.block_type, ba.is_synced, ba.reason, ba.first_seen, ba.last_seen
+                FROM blocked_accounts ba
+                JOIN accounts a ON ba.source_account_id = a.id
+                ORDER BY ba.first_seen DESC;
                 """
             cursor.execute(query)
             return cursor.fetchall()
