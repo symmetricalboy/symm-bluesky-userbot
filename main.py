@@ -10,7 +10,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from account_agent import AccountAgent, CLEARSKY_API_BASE_URL
 from setup_db import setup_database
-from database import Database
+from database import Database, get_connection
 from test_mod_list_sync import sync_mod_list_from_db
 import clearsky_helpers as cs
 
@@ -49,26 +49,15 @@ IS_PRIMARY = {
 def is_database_setup():
     """Check if the database exists and is properly configured."""
     try:
-        # Check for Railway-style DATABASE_URL
-        database_url = os.getenv('DATABASE_URL')
-        
-        conn_params = {}
-        if database_url:
-            # Connect using the DATABASE_URL
-            conn = psycopg2.connect(database_url)
-        else:
-            # Use individual connection parameters
-            conn_params['host'] = os.getenv('DB_HOST', 'localhost')
-            conn_params['port'] = os.getenv('DB_PORT', '5432')
-            conn_params['dbname'] = os.getenv('DB_NAME', 'symm_blocks')
-            conn_params['user'] = os.getenv('DB_USER', 'postgres')
-            conn_params['password'] = os.getenv('DB_PASSWORD', '')
-            conn = psycopg2.connect(**conn_params)
-            
+        # Use the Database class's get_connection method to respect LOCAL_TEST
+        conn = get_connection()
         cursor = conn.cursor()
         
         # Check if required tables exist
-        required_tables = ['accounts', 'blocked_accounts', 'mod_lists']
+        local_test = os.getenv('LOCAL_TEST', 'False').lower() == 'true'
+        table_suffix = "_test" if local_test else ""
+        
+        required_tables = [f'accounts{table_suffix}', f'blocked_accounts{table_suffix}', f'mod_lists{table_suffix}']
         cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
         existing_tables = [row[0] for row in cursor.fetchall()]
         
@@ -81,33 +70,33 @@ def is_database_setup():
             return False
 
         # Check for 'updated_at' column in 'accounts' table
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT EXISTS (
                 SELECT FROM information_schema.columns 
                 WHERE table_schema = 'public' 
-                AND table_name = 'accounts' 
+                AND table_name = 'accounts{table_suffix}' 
                 AND column_name = 'updated_at'
             )
         """)
         updated_at_exists = cursor.fetchone()[0]
         if not updated_at_exists:
-            logger.warning("Database check: 'accounts' table is missing 'updated_at' column.")
+            logger.warning(f"Database check: 'accounts{table_suffix}' table is missing 'updated_at' column.")
             cursor.close()
             conn.close()
             return False
 
         # Check for 'last_firehose_cursor' column in 'accounts' table
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT EXISTS (
                 SELECT FROM information_schema.columns 
                 WHERE table_schema = 'public' 
-                AND table_name = 'accounts' 
+                AND table_name = 'accounts{table_suffix}' 
                 AND column_name = 'last_firehose_cursor'
             )
         """)
         last_firehose_cursor_exists = cursor.fetchone()[0]
         if not last_firehose_cursor_exists:
-            logger.warning("Database check: 'accounts' table is missing 'last_firehose_cursor' column.")
+            logger.warning(f"Database check: 'accounts{table_suffix}' table is missing 'last_firehose_cursor' column.")
             cursor.close()
             conn.close()
             return False
@@ -124,15 +113,10 @@ def is_database_setup():
         
     except psycopg2.OperationalError as e:
         # This handles cases like database not existing or wrong credentials
-        db_name_to_log = conn_params.get('dbname', 'configured_db (via DATABASE_URL)') if conn_params else 'configured_db (via DATABASE_URL)'
-        logger.warning(f"Database check: OperationalError connecting to or querying database '{db_name_to_log}'. Error: {e}")
-        if cursor: cursor.close()
-        if conn: conn.close()
+        logger.warning(f"Database check: OperationalError connecting to or querying database. Error: {e}")
         return False
     except Exception as e:
         logger.error(f"Database check: An unexpected error occurred: {e}", exc_info=True)
-        if cursor: cursor.close()
-        if conn: conn.close()
         return False
 
 async def initialize_agents():
@@ -708,7 +692,7 @@ async def main():
     # Attempt to set up the database
     logger.info("Attempting to initialize/verify database schema...")
     try:
-        setup_database() # Attempt to create/update tables
+        setup_database(force_local=False) # Attempt to create/update tables, explicitly specifying NOT to force using test connection
         logger.info("Database setup/update function executed.")
         if not is_database_setup(): # Verify setup
             logger.critical("Database schema verification failed after setup attempt. Please check logs. Exiting.")

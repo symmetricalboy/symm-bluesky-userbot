@@ -21,7 +21,7 @@ def get_connection():
             # In local test mode, use TEST_DATABASE_URL
             test_database_url = os.getenv('TEST_DATABASE_URL')
             if test_database_url:
-                logger.debug("Local test mode: Connecting using TEST_DATABASE_URL")
+                logger.info("Local test mode: Connecting using TEST_DATABASE_URL")
                 return psycopg2.connect(test_database_url)
             else:
                 logger.error("Local test mode enabled but TEST_DATABASE_URL not found")
@@ -31,7 +31,7 @@ def get_connection():
             database_url = os.getenv('DATABASE_URL')
             
             if database_url:
-                logger.debug("Production mode: Connecting using DATABASE_URL")
+                logger.info("Production mode: Connecting using DATABASE_URL")
                 return psycopg2.connect(database_url)
             else:
                 # Fall back to individual connection parameters
@@ -41,7 +41,7 @@ def get_connection():
                 DB_USER = os.getenv('DB_USER', 'postgres')
                 DB_PASSWORD = os.getenv('DB_PASSWORD', '')
                 
-                logger.debug(f"Production mode: Connecting using individual parameters to {DB_HOST}:{DB_PORT}/{DB_NAME}")
+                logger.info(f"Production mode: Connecting using individual parameters to {DB_HOST}:{DB_PORT}/{DB_NAME}")
                 return psycopg2.connect(
                     host=DB_HOST,
                     port=DB_PORT,
