@@ -196,6 +196,16 @@ class Database:
             total_blocks = cursor.fetchone()['total_blocks']
             logger.info(f"DB_SYNC: Found {total_blocks} total 'blocking' entries in the database")
             
+            # Log raw data from blocked_accounts table for debugging
+            logger.info(f"DB_SYNC: Fetching detailed block data for debugging...")
+            cursor.execute("SELECT * FROM blocked_accounts WHERE block_type = 'blocking' LIMIT 20")
+            detailed_blocks = cursor.fetchall()
+            for block in detailed_blocks:
+                logger.info(f"DB_SYNC: Block record - DID: {block.get('did', 'unknown')}, " 
+                          f"Account ID: {block.get('source_account_id', 'unknown')}, "
+                          f"is_synced: {block.get('is_synced', 'unknown')}, "
+                          f"First seen: {block.get('first_seen', 'unknown')}")
+            
             # Log how many blocks are from non-primary accounts
             cursor.execute("""
                 SELECT COUNT(*) as secondary_blocks 
