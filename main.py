@@ -313,8 +313,27 @@ async def main():
     
     # Normal operation mode
     logger.info("Starting Bluesky account agent...")
+
+    # Check and set up database
+    logger.info("Checking database setup...")
+    if not is_database_setup():
+        logger.warning("Database is not set up correctly. Attempting to run setup...")
+        try:
+            setup_database()  # Call the imported setup function
+            logger.info("Database setup function executed.")
+            # Re-check database setup
+            if not is_database_setup():
+                logger.critical("Database setup failed after attempt. Please check database configuration and logs. Exiting.")
+                return False # Indicate failure
+            else:
+                logger.info("Database is now correctly set up.")
+        except Exception as e:
+            logger.critical(f"An error occurred during database setup: {e}. Please check database configuration and logs. Exiting.")
+            return False # Indicate failure
+    else:
+        logger.info("Database is correctly set up.")
     
-    # Initialize database and ensure it's set up
+    # Initialize database object (used by agents)
     database = Database()
     
     # Get account credentials

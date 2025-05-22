@@ -374,4 +374,70 @@ class Database:
             raise
         finally:
             cursor.close()
+            conn.close()
+
+    def get_last_firehose_cursor(self, account_did):
+        """Get the last processed firehose cursor for an account."""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("SELECT last_firehose_cursor FROM accounts WHERE did = %s", (account_did,))
+            result = cursor.fetchone()
+            return result['last_firehose_cursor'] if result else None
+        except Exception as e:
+            logger.error(f"Error getting last firehose cursor for {account_did}: {e}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+
+    def save_last_firehose_cursor(self, account_did, cursor_val):
+        """Save the last processed firehose cursor for an account."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE accounts SET last_firehose_cursor = %s, updated_at = CURRENT_TIMESTAMP WHERE did = %s",
+                (cursor_val, account_did)
+            )
+            conn.commit()
+            logger.debug(f"Saved last firehose cursor {cursor_val} for {account_did}")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error saving last firehose cursor for {account_did}: {e}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+
+    def get_all_dids_primary_should_list(self, primary_account_id):
+        """
+        Get all unique DIDs that the primary account should have on its moderation list.
+        This includes:
+        1. DIDs directly blocked by the primary account itself ('blocking' type).
+        2. DIDs blocked by any secondary managed account ('blocking' type), 
+           which are not yet marked as handled/synced by the primary for list purposes.
+           Effectively, any 'blocking' record in the DB should be on the list.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            # This query aims to get all unique DIDs that are currently marked as 'blocking'
+            # by ANY of the managed accounts. The moderation list should reflect all such DIDs.
+            query = """
+            SELECT DISTINCT ba.did
+            FROM blocked_accounts ba
+            WHERE ba.block_type = 'blocking';
+            """
+            # We don't strictly need primary_account_id for this version of the query,
+            # as the goal is to list *all* DIDs that *any* of our accounts are actively blocking.
+            # The primary account's list should be comprehensive.
+            cursor.execute(query)
+            results = cursor.fetchall()
+            return results # Returns a list of RealDictRow objects, e.g., [{'did': 'did:plc:...'}]
+        except Exception as e:
+            logger.error(f"Error getting all DIDs primary should list: {e}")
+            raise
+        finally:
+            cursor.close()
             conn.close() 

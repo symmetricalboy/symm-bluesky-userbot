@@ -110,6 +110,24 @@ def setup_database():
                 ADD COLUMN updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 """)
                 logger.info("Added updated_at column to accounts table")
+
+            # Check if last_firehose_cursor column exists and add it if it doesn't
+            cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.columns 
+                WHERE table_schema = 'public' 
+                AND table_name = 'accounts' 
+                AND column_name = 'last_firehose_cursor'
+            )
+            """)
+            last_firehose_cursor_exists = cursor.fetchone()[0]
+            if not last_firehose_cursor_exists:
+                logger.info("Adding last_firehose_cursor column to accounts table...")
+                cursor.execute("""
+                ALTER TABLE accounts
+                ADD COLUMN last_firehose_cursor BIGINT DEFAULT NULL
+                """)
+                logger.info("Added last_firehose_cursor column to accounts table")
         
         # Check for blocked_accounts table
         cursor.execute("""
