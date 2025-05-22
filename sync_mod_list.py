@@ -10,18 +10,25 @@ from atproto import AsyncClient
 # Load environment variables
 load_dotenv()
 
-# Set up logging with clear formatting
+# Set up logging with conditional file logging
 log_file = f"sync_mod_list_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(log_file),
-        logging.StreamHandler()
-    ]
-)
 
-logger = logging.getLogger()
+try:
+    from utils import setup_conditional_logging
+    logger = setup_conditional_logging(__name__, log_file)
+except ImportError:
+    # Fallback if utils is not available
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file),
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    logger.info(f"Fallback logging setup - file: {log_file}")
+
 logger.info(f"Starting mod list sync - logging to {log_file}")
 
 # Constants - Updated for better rate limiting

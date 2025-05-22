@@ -821,10 +821,10 @@ class Database:
             raise
 
     async def get_last_firehose_cursor(self, did: str) -> Optional[int]:
-        """Get the last processed firehose cursor for an account."""
-        table_suffix = "_test" if self.test_mode else ""
-        
+        """Get the last firehose cursor for a given DID."""
         try:
+            table_suffix = "_test" if self.test_mode else ""
+            
             await self.ensure_pool()
             
             async with connection_pool.acquire() as conn:
@@ -832,12 +832,152 @@ class Database:
                     f"SELECT last_firehose_cursor FROM accounts{table_suffix} WHERE did = $1",
                     did
                 )
+                
+                if cursor is not None:
+                    self.contextual_logger.debug(f"Retrieved firehose cursor for {did}: {cursor}")
+                else:
+                    self.contextual_logger.debug(f"No firehose cursor found for {did}")
+                
+                return cursor
+                
+        except Exception as e:
+            self.contextual_logger.error(f"Error retrieving firehose cursor for {did}: {e}")
+            return None
+
+    @async_retry(RetryConfig(max_attempts=2, base_delay=0.5))
+    async def save_session_data(self, handle: str, did: str, access_jwt: str, refresh_jwt: str) -> bool:
+        """Save session data to the database for production use."""
+        try:
+            table_suffix = "_test" if self.test_mode else ""
             
-            return cursor
+            await self.ensure_pool()
+            
+            if performance_monitor:
+                async with performance_monitor.measure('db_save_session'):
+                    result = await self._execute_save_session(handle, did, access_jwt, refresh_jwt, table_suffix)
+            else:
+                result = await self._execute_save_session(handle, did, access_jwt, refresh_jwt, table_suffix)
+            
+            return result
             
         except Exception as e:
-            self.contextual_logger.error(f"Error getting firehose cursor for {did}: {e}")
+            self.contextual_logger.error(f"Error saving session data for {handle}: {e}")
+            return False
+
+    async def _execute_save_session(self, handle: str, did: str, access_jwt: str, refresh_jwt: str, table_suffix: str) -> bool:
+        """Execute the session data save operation."""
+        try:
+            async with connection_pool.acquire() as conn:
+                # First ensure the account exists in the database
+                existing_account = await conn.fetchrow(f"""
+                    SELECT id FROM accounts{table_suffix} WHERE did = $1
+                """, did)
+                
+                if not existing_account:
+                    # Account doesn't exist, create it first
+                    await conn.execute(f"""
+                        INSERT INTO accounts{table_suffix} (handle, did, is_primary, created_at, updated_at)
+                        VALUES ($1, $2, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON CONFLICT (did) DO NOTHING
+                    """, handle, did)
+                    self.contextual_logger.debug(f"Created account record for {handle} (DID: {did})")
+                
+                # Now update session data for the account
+                result = await conn.execute(f"""
+                    UPDATE accounts{table_suffix} 
+                    SET access_jwt = $1, 
+                        refresh_jwt = $2, 
+                        access_jwt_date = CURRENT_TIMESTAMP,
+                        refresh_jwt_date = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE did = $3
+                """, access_jwt, refresh_jwt, did)
+                
+                # Check if any rows were affected
+                if result == "UPDATE 0":
+                    self.contextual_logger.warning(f"No rows updated for session save for {handle} (DID: {did})")
+                    return False
+                
+                self.contextual_logger.debug(f"Saved session data for {handle} (DID: {did})")
+                return True
+                
+        except Exception as e:
+            self.contextual_logger.error(f"Error executing session save for {handle}: {e}")
+            return False
+
+    @async_retry(RetryConfig(max_attempts=2, base_delay=0.5))
+    async def load_session_data(self, handle: str) -> Optional[Dict[str, Any]]:
+        """Load session data from the database."""
+        try:
+            table_suffix = "_test" if self.test_mode else ""
+            
+            await self.ensure_pool()
+            
+            if performance_monitor:
+                async with performance_monitor.measure('db_load_session'):
+                    result = await self._execute_load_session(handle, table_suffix)
+            else:
+                result = await self._execute_load_session(handle, table_suffix)
+            
+            return result
+            
+        except Exception as e:
+            self.contextual_logger.error(f"Error loading session data for {handle}: {e}")
             return None
+
+    async def _execute_load_session(self, handle: str, table_suffix: str) -> Optional[Dict[str, Any]]:
+        """Execute the session data load operation."""
+        try:
+            async with connection_pool.acquire() as conn:
+                row = await conn.fetchrow(f"""
+                    SELECT handle, did, access_jwt, refresh_jwt, access_jwt_date, refresh_jwt_date
+                    FROM accounts{table_suffix}
+                    WHERE handle = $1 AND access_jwt IS NOT NULL
+                """, handle)
+                
+                if row:
+                    session_data = {
+                        'handle': row['handle'],
+                        'did': row['did'],
+                        'accessJwt': row['access_jwt'],
+                        'refreshJwt': row['refresh_jwt'],
+                        'accessDate': row['access_jwt_date'].isoformat() if row['access_jwt_date'] else None,
+                        'refreshDate': row['refresh_jwt_date'].isoformat() if row['refresh_jwt_date'] else None
+                    }
+                    
+                    self.contextual_logger.debug(f"Loaded session data for {handle}")
+                    return session_data
+                else:
+                    self.contextual_logger.debug(f"No session data found for {handle}")
+                    return None
+                
+        except Exception as e:
+            self.contextual_logger.error(f"Error executing session load for {handle}: {e}")
+            return None
+
+    @async_retry(RetryConfig(max_attempts=2, base_delay=0.5))
+    async def update_access_token(self, handle: str, access_jwt: str) -> bool:
+        """Update just the access token for token refresh."""
+        try:
+            table_suffix = "_test" if self.test_mode else ""
+            
+            await self.ensure_pool()
+            
+            async with connection_pool.acquire() as conn:
+                await conn.execute(f"""
+                    UPDATE accounts{table_suffix} 
+                    SET access_jwt = $1, 
+                        access_jwt_date = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE handle = $2
+                """, access_jwt, handle)
+                
+                self.contextual_logger.debug(f"Updated access token for {handle}")
+                return True
+                
+        except Exception as e:
+            self.contextual_logger.error(f"Error updating access token for {handle}: {e}")
+            return False
 
 # Compatibility layer for synchronous code during transition
 # These will be removed in the future when all code is async

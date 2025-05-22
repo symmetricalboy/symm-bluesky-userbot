@@ -19,7 +19,6 @@ from atproto_client.models.com.atproto.sync.subscribe_repos import Commit as Fir
 from atproto_core.car import CAR
 import cbor2
 from database import Database
-from test_mod_list_sync import sync_mod_list_from_db
 import time
 from datetime import datetime, timedelta
 import clearsky_helpers as cs 
@@ -92,7 +91,7 @@ class AccountAgent:
         return f"session_{self.handle.replace('.', '_').replace('@', '_')}.json"
 
     async def _load_session_from_file(self):
-        """Load existing session data from file."""
+        """Load existing session data from file (local development only)."""
         session_file = self._get_session_file_path()
         if not os.path.exists(session_file):
             logger.debug(f"No session file found for {self.handle}")
@@ -107,21 +106,64 @@ class AccountAgent:
                 logger.warning(f"Invalid session file format for {self.handle}")
                 return None
                 
-            logger.info(f"Loaded existing session for {self.handle}")
+            logger.info(f"Loaded existing session from file for {self.handle}")
             return session_data
         except Exception as e:
             logger.error(f"Error loading session file for {self.handle}: {e}")
             return None
 
     async def _save_session_to_file(self, session_data):
-        """Save session data to file."""
+        """Save session data to file (local development only)."""
         session_file = self._get_session_file_path()
         try:
             with open(session_file, 'w') as f:
                 json.dump(session_data, f, indent=2)
-            logger.debug(f"Saved session data for {self.handle}")
+            logger.debug(f"Saved session data to file for {self.handle}")
         except Exception as e:
             logger.error(f"Error saving session file for {self.handle}: {e}")
+
+    async def _load_session_from_storage(self):
+        """Load session data from appropriate storage (database in production, files locally)."""
+        is_local = os.getenv('LOCAL_TEST', 'False').lower() == 'true'
+        
+        if is_local:
+            # Local development - use file storage
+            return await self._load_session_from_file()
+        else:
+            # Production - use database storage
+            try:
+                session_data = await self.database.load_session_data(self.handle)
+                if session_data:
+                    logger.info(f"Loaded existing session from database for {self.handle}")
+                else:
+                    logger.debug(f"No session data found in database for {self.handle}")
+                return session_data
+            except Exception as e:
+                logger.error(f"Error loading session from database for {self.handle}: {e}")
+                return None
+
+    async def _save_session_to_storage(self, session_data):
+        """Save session data to appropriate storage (database in production, files locally)."""
+        is_local = os.getenv('LOCAL_TEST', 'False').lower() == 'true'
+        
+        if is_local:
+            # Local development - use file storage
+            await self._save_session_to_file(session_data)
+        else:
+            # Production - use database storage
+            try:
+                success = await self.database.save_session_data(
+                    handle=session_data['handle'],
+                    did=session_data['did'],
+                    access_jwt=session_data['accessJwt'],
+                    refresh_jwt=session_data['refreshJwt']
+                )
+                if success:
+                    logger.debug(f"Saved session data to database for {self.handle}")
+                else:
+                    logger.error(f"Failed to save session data to database for {self.handle}")
+            except Exception as e:
+                logger.error(f"Error saving session to database for {self.handle}: {e}")
 
     def _is_access_token_expired(self, session_data):
         """Check if access token needs refresh."""
@@ -169,7 +211,17 @@ class AccountAgent:
             session_data['refreshJwt'] = refresh_response['refreshJwt']
             session_data['accessDate'] = datetime.now().isoformat()
             
-            await self._save_session_to_file(session_data)
+            # Save updated session data
+            await self._save_session_to_storage(session_data)
+            
+            # Also update just the access token in database for efficiency
+            is_local = os.getenv('LOCAL_TEST', 'False').lower() == 'true'
+            if not is_local:
+                try:
+                    await self.database.update_access_token(self.handle, refresh_response['accessJwt'])
+                except Exception as e:
+                    logger.warning(f"Failed to update access token in database for {self.handle}: {e}")
+            
             logger.info(f"Successfully refreshed access token for {self.handle}")
             return session_data
             
@@ -207,7 +259,7 @@ class AccountAgent:
     async def _login_with_session_management(self):
         """Enhanced login method with session management and token reuse."""
         # Try to load existing session
-        session_data = await self._load_session_from_file()
+        session_data = await self._load_session_from_storage()
         
         if session_data:
             # Check if refresh token is still valid
@@ -258,6 +310,12 @@ class AccountAgent:
             try:
                 profile = await self.client.login(self.handle, self.password)
             except Exception as login_exc:
+                error_msg = str(login_exc).lower()
+                if "rate limit" in error_msg or "ratelimitexceeded" in error_msg or "429" in str(login_exc):
+                    logger.error(f"🚫 LOGIN RATE LIMITED for {self.handle}: {login_exc}")
+                    logger.error(f"⏳ Account {self.handle} has hit the daily login limit (10/day). You must wait ~24 hours.")
+                    logger.error(f"💡 Consider using existing session files or reducing login frequency.")
+                    return False
                 logger.error(f"ATPROTO LOGIN DIRECT EXCEPTION for {self.handle}: Type={type(login_exc).__name__}, Details={repr(login_exc)}", exc_info=True)
                 raise # Re-raise to be caught by the outer handler or become the primary error
             
@@ -292,7 +350,7 @@ class AccountAgent:
                 'accessDate': datetime.now().isoformat(),
                 'refreshDate': datetime.now().isoformat()
             }
-            await self._save_session_to_file(session_data)
+            await self._save_session_to_storage(session_data)
             
             return True
         except UnboundLocalError as ule:
@@ -1208,13 +1266,10 @@ class AccountAgent:
         
         logger.info(f"MOD_LIST_SYNC ({self.handle}): Syncing moderation list with database...")
         try:
-            # Use the function from test_mod_list_sync.py
-            success = await sync_mod_list_from_db()
-            if success:
-                logger.info(f"MOD_LIST_SYNC ({self.handle}): Successfully synchronized blocks to moderation list")
-            else:
-                logger.error(f"MOD_LIST_SYNC ({self.handle}): Failed to synchronize blocks to moderation list")
-            return success
+            # Use the existing update_moderation_list_items method
+            await self.update_moderation_list_items()
+            logger.info(f"MOD_LIST_SYNC ({self.handle}): Successfully synchronized blocks to moderation list")
+            return True
         except Exception as e:
             logger.error(f"MOD_LIST_SYNC ({self.handle}): Error synchronizing blocks to moderation list: {e}", exc_info=True)
             return False

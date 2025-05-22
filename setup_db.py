@@ -154,6 +154,31 @@ async def setup_database(test_mode=None, force_local=True):
                 ADD COLUMN last_firehose_cursor BIGINT DEFAULT NULL
                 """)
                 logger.info(f"Added last_firehose_cursor column to accounts{table_suffix} table")
+
+            # Check if session storage columns exist and add them if they don't
+            session_columns = [
+                ('access_jwt', 'TEXT'),
+                ('refresh_jwt', 'TEXT'),
+                ('access_jwt_date', 'TIMESTAMP WITH TIME ZONE'),
+                ('refresh_jwt_date', 'TIMESTAMP WITH TIME ZONE')
+            ]
+            
+            for column_name, column_type in session_columns:
+                column_exists = await conn.fetchval(f"""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.columns 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'accounts{table_suffix}' 
+                    AND column_name = '{column_name}'
+                )
+                """)
+                if not column_exists:
+                    logger.info(f"Adding {column_name} column to accounts{table_suffix} table...")
+                    await conn.execute(f"""
+                    ALTER TABLE accounts{table_suffix}
+                    ADD COLUMN {column_name} {column_type} DEFAULT NULL
+                    """)
+                    logger.info(f"Added {column_name} column to accounts{table_suffix} table")
         
         # Check for blocked_accounts table
         blocked_accounts_exists = await conn.fetchval(f"""

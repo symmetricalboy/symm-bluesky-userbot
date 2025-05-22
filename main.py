@@ -328,7 +328,13 @@ class ProductionOrchestrator:
             )
             
             if not await primary_agent.login():
-                raise Exception(f"Failed to login primary agent: {primary_handle}")
+                error_msg = f"Failed to login primary agent: {primary_handle}"
+                self.logger.error(f"❌ {error_msg}")
+                self.logger.error("💡 If this is a rate limit error:")
+                self.logger.error("   • Wait 24 hours for the daily limit to reset")
+                self.logger.error("   • Or create a session file manually using create_manual_session.py")
+                self.logger.error("   • Or check existing session files with check_session_status.py")
+                raise Exception(error_msg)
             
             self.agents.append(primary_agent)
             self.logger.success(f"✅ Primary agent initialized: {primary_handle}")
@@ -351,7 +357,7 @@ class ProductionOrchestrator:
         accounts = secondary_accounts_str.split(';')
         initialized_count = 0
         
-        for account_str in accounts:
+        for i, account_str in enumerate(accounts):
             try:
                 # Parse account credentials
                 if ':' in account_str:
@@ -364,6 +370,12 @@ class ProductionOrchestrator:
                 
                 handle = handle.strip()
                 password = password.strip()
+                
+                # Add delay between login attempts to avoid rate limiting
+                if i > 0:
+                    delay = 30  # 30 seconds between each login attempt
+                    self.logger.info(f"⏳ Waiting {delay}s before next login attempt to avoid rate limits...")
+                    await asyncio.sleep(delay)
                 
                 # Initialize agent
                 agent = AccountAgent(
@@ -381,8 +393,14 @@ class ProductionOrchestrator:
                     self.logger.warning(f"⚠️  Failed to login secondary agent: {handle}")
                     
             except Exception as e:
-                self.logger.error(f"Error initializing secondary agent {account_str}: {e}")
-                continue
+                error_msg = str(e).lower()
+                if "rate limit" in error_msg or "too many requests" in error_msg:
+                    self.logger.error(f"🚫 Rate limit hit for {handle}. You may need to wait 24 hours before retrying.")
+                    # Continue with other accounts instead of failing completely
+                    continue
+                else:
+                    self.logger.error(f"Error initializing secondary agent {account_str}: {e}")
+                    continue
         
         return initialized_count
     
@@ -391,16 +409,23 @@ class ProductionOrchestrator:
         try:
             self.logger.info("📋 Syncing moderation lists...")
             
-            # Import and use the existing sync function
-            from test_mod_list_sync import sync_mod_list_from_db
-            success = await sync_mod_list_from_db()
+            # Use primary agent's sync method
+            primary_agent = None
+            for agent in self.agents:
+                if agent.is_primary:
+                    primary_agent = agent
+                    break
             
-            if success:
-                self.logger.success("✅ Moderation list sync completed")
+            if primary_agent:
+                success = await primary_agent.sync_mod_list_with_database()
+                if success:
+                    self.logger.success("✅ Moderation list sync completed")
+                else:
+                    self.logger.warning("⚠️  Moderation list sync reported failure")
+                return success
             else:
-                self.logger.warning("⚠️  Moderation list sync reported failure")
-            
-            return success
+                self.logger.warning("⚠️  No primary agent found for moderation list sync")
+                return False
             
         except Exception as e:
             self.logger.error(f"Moderation list sync failed: {e}")

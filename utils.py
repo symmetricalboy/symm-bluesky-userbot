@@ -115,30 +115,34 @@ class StructuredLogger:
     def __init__(self, name: str, level: str = "INFO", 
                  use_colors: bool = True, use_emojis: bool = None,
                  log_file: Optional[str] = None):
-        self.name = name
         self.logger = logging.getLogger(name)
         self.logger.setLevel(getattr(logging, level.upper()))
         
-        # Clear existing handlers to avoid duplicates
-        self.logger.handlers.clear()
-        self.logger.propagate = False  # Prevent propagation to avoid duplicate messages
+        # Avoid duplicate handlers
+        if self.logger.handlers:
+            self.logger.handlers.clear()
         
-        # Console handler with colors
-        console_handler = logging.StreamHandler(sys.stdout)
+        # Console handler
+        console_handler = logging.StreamHandler()
         console_formatter = ColoredFormatter(use_colors, use_emojis)
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
         
-        # File handler (optional)
+        # File handler (only in local development)
         if log_file:
-            try:
-                file_handler = logging.FileHandler(log_file, encoding='utf-8')
-                file_formatter = ColoredFormatter(False, False)  # No colors in file
-                file_handler.setFormatter(file_formatter)
-                self.logger.addHandler(file_handler)
-            except Exception:
-                # If file logging fails, continue without it
-                pass
+            is_local = os.getenv('LOCAL_TEST', 'False').lower() == 'true'
+            if is_local:
+                try:
+                    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+                    file_formatter = ColoredFormatter(False, False)  # No colors in file
+                    file_handler.setFormatter(file_formatter)
+                    self.logger.addHandler(file_handler)
+                except Exception:
+                    # If file logging fails, continue without it
+                    pass
+            else:
+                # In production, just log that file logging is disabled
+                self.logger.debug(f"Production mode: Skipping file logging to {log_file}")
     
     def success(self, message, *args, **kwargs):
         """Log a success message"""
@@ -493,6 +497,53 @@ def create_timestamped_filename(base_name: str, extension: str = "log") -> str:
     """Create a filename with timestamp"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{base_name}_{timestamp}.{extension}"
+
+def setup_conditional_logging(name: str, log_file: Optional[str] = None, level: str = "INFO") -> logging.Logger:
+    """
+    Setup logging with conditional file logging based on LOCAL_TEST environment variable.
+    In production (LOCAL_TEST=False), only console logging is used.
+    In local development (LOCAL_TEST=True), both console and file logging are used.
+    
+    Args:
+        name: Logger name
+        log_file: Optional log file path (only used in local development)
+        level: Logging level
+        
+    Returns:
+        Configured logger
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(getattr(logging, level.upper()))
+    
+    # Clear existing handlers to avoid duplicates
+    if logger.handlers:
+        logger.handlers.clear()
+    
+    # Console handler (always present)
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler (only in local development)
+    is_local = os.getenv('LOCAL_TEST', 'False').lower() == 'true'
+    if log_file and is_local:
+        try:
+            file_handler = logging.FileHandler(log_file, encoding='utf-8')
+            file_formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            file_handler.setFormatter(file_formatter)
+            logger.addHandler(file_handler)
+            logger.info(f"Local development mode: Logging to file {log_file}")
+        except Exception as e:
+            logger.warning(f"Failed to setup file logging to {log_file}: {e}")
+    elif log_file and not is_local:
+        logger.debug(f"Production mode: Skipping file logging to {log_file}")
+    
+    return logger
 
 @asynccontextmanager
 async def logged_operation(operation_name: str, logger: Optional[StructuredLogger] = None):

@@ -10,20 +10,26 @@ import time
 # Load environment variables
 load_dotenv()
 
-# Set up logging to both console and file
+from account_agent import AccountAgent
+
+# Set up logging with conditional file logging
 log_file = f"mod_list_sync_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
-# Configure root logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file),
-        logging.StreamHandler()  # Console output
-    ]
-)
-logger = logging.getLogger(__name__)
-logger.info(f"Logging to file: {log_file}")
+try:
+    from utils import setup_conditional_logging
+    logger = setup_conditional_logging(__name__, log_file)
+except ImportError:
+    # Fallback if utils is not available
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file),
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    logger.info(f"Fallback logging setup - file: {log_file}")
 
 async def test_mod_list_sync():
     """Test syncing blocks from database to moderation list"""
