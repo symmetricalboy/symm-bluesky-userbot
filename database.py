@@ -497,7 +497,7 @@ class Database:
             # For now, we'll create a placeholder that will be updated during agent initialization
             primary_account_id = await self.register_account(
                 handle=primary_handle,
-                did="placeholder_will_be_updated",
+                did=f"placeholder_primary_{primary_handle}",
                 is_primary=True
             )
             
@@ -528,9 +528,10 @@ class Database:
                         password = password.strip()
                         
                         # Register secondary account (DID will be updated during login)
+                        # Use unique placeholder DID incorporating the handle
                         await self.register_account(
                             handle=handle,
-                            did="placeholder_will_be_updated",
+                            did=f"placeholder_secondary_{handle}",
                             is_primary=False
                         )
                         

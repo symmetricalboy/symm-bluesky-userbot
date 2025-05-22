@@ -253,6 +253,11 @@ class ProductionOrchestrator:
         account_handle = account['handle']
         account_id = account['id']
         
+        # Skip if account has placeholder DID (not yet authenticated)
+        if account_did.startswith('placeholder_'):
+            self.logger.warning(f"⚠️  Skipping ClearSky fetch for {account_handle} - placeholder DID not yet updated")
+            return 0
+        
         blocks_added = 0
         
         try:

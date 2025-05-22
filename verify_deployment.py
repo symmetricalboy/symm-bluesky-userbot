@@ -81,8 +81,8 @@ def check_config_files():
 def check_environment_variables():
     """Check if required environment variables are set"""
     required_env_vars = [
-        'BLUESKY_HANDLE',
-        'BLUESKY_PASSWORD'
+        'PRIMARY_BLUESKY_HANDLE',
+        'PRIMARY_BLUESKY_PASSWORD'
     ]
     
     missing_vars = []

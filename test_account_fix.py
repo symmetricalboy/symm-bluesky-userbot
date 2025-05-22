@@ -35,7 +35,7 @@ async def test_account_registration():
             
         # Third registration with placeholder DID (like during initialization)
         print("Third registration with placeholder DID...")
-        account_id3 = await db.register_account(handle, "placeholder_will_be_updated", is_primary=True)
+        account_id3 = await db.register_account(handle, f"placeholder_primary_{handle}", is_primary=True)
         print(f"✅ Third registration successful, account ID: {account_id3}")
         
         if account_id1 == account_id3:
