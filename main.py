@@ -495,9 +495,17 @@ async def main():
                     await agent.start_monitoring()
                     secondary_agents.append(agent)
                 else:
-                    logger.error(f"Failed to login as secondary account {handle}")
+                    logger.error(f"Failed to login as secondary account {handle}. Halting application as all accounts must be operational.")
+                    # Clean up already started primary agent before exiting
+                    logger.info("Shutting down already started primary agent before exiting due to secondary account login failure...")
+                    await primary_agent.stop_monitoring()
+                    return False # Indicate failure to stop the application
             except Exception as e:
-                logger.error(f"Error initializing secondary account: {e}")
+                logger.error(f"Error initializing secondary account {handle}: {e}. Halting application.")
+                # Clean up already started primary agent
+                logger.info("Shutting down already started primary agent before exiting due to secondary account initialization error...")
+                await primary_agent.stop_monitoring()
+                return False # Indicate failure
     
     # Keep the program running
     try:
