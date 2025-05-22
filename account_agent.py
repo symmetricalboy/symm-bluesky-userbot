@@ -6,10 +6,6 @@ from atproto import AsyncClient as ATProtoAsyncClient
 from atproto_client import models
 from atproto_firehose import AsyncFirehoseSubscribeReposClient
 from atproto_firehose.models import MessageFrame
-from atproto_client.models.com.atproto.sync.subscribe_repos import Commit as FirehoseCommitModel
-from atproto_client.models.app.bsky.graph.block import Main as BlockRecord
-from atproto_client.models.app.bsky.graph.get_blocks import Params as GetBlocksParams
-from atproto_client.models.app.bsky.graph.get_list import Params as GetListParams
 
 from atproto_core.car import CAR
 import cbor2
