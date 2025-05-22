@@ -30,7 +30,7 @@ CLEARSKY_API_BASE_URL = os.getenv('CLEARSKY_API_URL', 'https://api.clearsky.serv
 # BLUESKY_API_URL is not directly used by ATProtoAsyncClient if not passed to constructor, it defaults to bsky.social
 
 # ClearSky Rate Limiting
-CLEARSKY_REQUEST_DELAY = 0.25 # 4 requests per second, just under 5 req/sec limit
+CLEARSKY_REQUEST_DELAY = 1.0  # 1 request per second, down from 4 req/sec to avoid rate limiting
 
 # Firehose constants
 FIREHOSE_HOST = "jetstream.atproto.tools" 
@@ -108,7 +108,7 @@ class AccountAgent:
             existing_list = None
             try:
                 logger.debug(f"Fetching existing lists for {self.did}...")
-                lists_response = await self.client.app.bsky.graph.get_lists(actor=self.did)
+                lists_response = await self.client.app.bsky.graph.get_lists(params={"actor": self.did})
                 for lst in lists_response.lists:
                     if lst.name == list_name and lst.purpose == list_purpose:
                         existing_list = lst
@@ -426,46 +426,85 @@ class AccountAgent:
         page = 1
         max_pages = 500 
         while page <= max_pages:
-            await asyncio.sleep(CLEARSKY_REQUEST_DELAY)
-            formatted_endpoint = endpoint_template.replace("{did}", self.did)
-            url = f"{CLEARSKY_API_BASE_URL}{formatted_endpoint}/{page}"
-            logger.debug(f"CLEARSKY_FETCH ({self.did}): Fetching page {page} from {url}")
-            try:
-                response = await self.http_client.get(url)
-                if response.status_code == 404:
-                    logger.debug(f"CLEARSKY_FETCH ({self.did}): Page {page} not found for {url} (404), assuming end of list.")
-                    break 
-                response.raise_for_status() # Raises for 4xx/5xx responses except 404 handled above
-                data = response.json()
-                
-                current_page_dids = []
-                blocklist_data = data.get('data', {}).get('blocklist')
+            # Implement exponential backoff with retries for rate limiting
+            retry_count = 0
+            max_retries = 5
+            retry_delay = CLEARSKY_REQUEST_DELAY
+            
+            while retry_count <= max_retries:
+                try:
+                    await asyncio.sleep(retry_delay)
+                    formatted_endpoint = endpoint_template.replace("{did}", self.did)
+                    url = f"{CLEARSKY_API_BASE_URL}{formatted_endpoint}/{page}"
+                    logger.debug(f"CLEARSKY_FETCH ({self.did}): Fetching page {page} from {url} (retry: {retry_count})")
+                    
+                    response = await self.http_client.get(url)
+                    if response.status_code == 404:
+                        logger.debug(f"CLEARSKY_FETCH ({self.did}): Page {page} not found for {url} (404), assuming end of list.")
+                        break 
+                    
+                    if response.status_code == 429:
+                        retry_count += 1
+                        if retry_count > max_retries:
+                            logger.error(f"CLEARSKY_FETCH ({self.did}): Rate limit exceeded and max retries reached for {url}. Giving up.")
+                            break
+                        # Exponential backoff
+                        retry_delay = min(60, retry_delay * 2)  # Cap at 60 seconds
+                        logger.warning(f"CLEARSKY_FETCH ({self.did}): Rate limit hit (429) for {url}. Retrying in {retry_delay}s (retry {retry_count}/{max_retries})")
+                        continue
+                    
+                    response.raise_for_status() # Raises for other 4xx/5xx responses
+                    data = response.json()
+                    
+                    current_page_dids = []
+                    blocklist_data = data.get('data', {}).get('blocklist')
 
-                if blocklist_data is None: 
-                    logger.debug(f"CLEARSKY_FETCH ({self.did}): No 'blocklist' key or it's null/empty in response from {url}, page {page}. Assuming end.")
-                    break
-                
-                current_page_dids = [item['did'] for item in blocklist_data if 'did' in item and isinstance(item['did'], str) and item['did'].startswith('did:')]
-                logger.debug(f"CLEARSKY_FETCH ({self.did}): Page {page} from {url} yielded {len(current_page_dids)} DIDs.")
+                    if blocklist_data is None: 
+                        logger.debug(f"CLEARSKY_FETCH ({self.did}): No 'blocklist' key or it's null/empty in response from {url}, page {page}. Assuming end.")
+                        break
+                    
+                    current_page_dids = [item['did'] for item in blocklist_data if 'did' in item and isinstance(item['did'], str) and item['did'].startswith('did:')]
+                    logger.debug(f"CLEARSKY_FETCH ({self.did}): Page {page} from {url} yielded {len(current_page_dids)} DIDs.")
 
-                if not current_page_dids and page > 1 : 
-                    logger.debug(f"CLEARSKY_FETCH ({self.did}): No DIDs found on page {page} for {url} (and not first page), assuming end of list.")
+                    if not current_page_dids and page > 1: 
+                        logger.debug(f"CLEARSKY_FETCH ({self.did}): No DIDs found on page {page} for {url} (and not first page), assuming end of list.")
+                        break
+                    
+                    all_dids.extend(current_page_dids)
+                    if len(current_page_dids) < 100: 
+                        logger.debug(f"CLEARSKY_FETCH ({self.did}): Fetched {len(current_page_dids)} DIDs on page {page} for {url}, <100, assuming last page.")
+                        break
+                    
+                    # Success! Move to next page and reset retry logic
+                    page += 1
+                    break  # Exit retry loop on success
+                    
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 429:
+                        retry_count += 1
+                        if retry_count > max_retries:
+                            logger.error(f"CLEARSKY_FETCH ({self.did}): Rate limit exceeded and max retries reached for {url}. Giving up.")
+                            break
+                        # Exponential backoff
+                        retry_delay = min(60, retry_delay * 2)  # Cap at 60 seconds
+                        logger.warning(f"CLEARSKY_FETCH ({self.did}): Rate limit hit (429) for {url}. Retrying in {retry_delay}s (retry {retry_count}/{max_retries})")
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(f"CLEARSKY_FETCH ({self.did}): HTTP error fetching {url}: {e.response.status_code} - {e.response.text}", exc_info=True)
+                        break
+                except httpx.RequestError as e:
+                    logger.error(f"CLEARSKY_FETCH ({self.did}): Request error fetching {url}: {e}", exc_info=True)
                     break
+                except Exception as e: 
+                    logger.error(f"CLEARSKY_FETCH ({self.did}): Unexpected error fetching or parsing {url}: {e}", exc_info=True)
+                    break
+            
+            # If we've exhausted retries with rate limiting, break out of page loop
+            if retry_count > max_retries:
+                logger.error(f"CLEARSKY_FETCH ({self.did}): Giving up on pagination due to persistent rate limiting")
+                break
                 
-                all_dids.extend(current_page_dids)
-                if len(current_page_dids) < 100: 
-                    logger.debug(f"CLEARSKY_FETCH ({self.did}): Fetched {len(current_page_dids)} DIDs on page {page} for {url}, <100, assuming last page.")
-                    break
-                page += 1
-            except httpx.HTTPStatusError as e:
-                logger.error(f"CLEARSKY_FETCH ({self.did}): HTTP error fetching {url}: {e.response.status_code} - {e.response.text}", exc_info=True)
-                break
-            except httpx.RequestError as e:
-                logger.error(f"CLEARSKY_FETCH ({self.did}): Request error fetching {url}: {e}", exc_info=True)
-                break
-            except Exception as e: 
-                logger.error(f"CLEARSKY_FETCH ({self.did}): Unexpected error fetching or parsing {url}: {e}", exc_info=True)
-                break
         if page >= max_pages:
              logger.warning(f"CLEARSKY_FETCH ({self.did}): Reached max_pages ({max_pages}) for endpoint {endpoint_template}.")
         logger.debug(f"CLEARSKY_FETCH ({self.did}): Finished paginated fetch for {endpoint_template}. Total DIDs: {len(all_dids)}.")
