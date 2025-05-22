@@ -247,7 +247,8 @@ class AccountAgent:
                 return True
                 
             except Exception as e:
-                logger.warning(f"Failed to use saved session for {self.handle}: {e}")
+                error_message = f"Failed to use saved session for {self.handle}. Error type: {type(e).__name__}, Error details: {repr(e)}"
+                logger.error(error_message)
                 logger.info(f"Falling back to full login for {self.handle}")
                 
         # Perform full login
@@ -292,7 +293,8 @@ class AccountAgent:
             return True
             
         except Exception as e:
-            logger.error(f"Full login failed for {self.handle}: {e}")
+            error_message = f"Full login failed for {self.handle}. Error type: {type(e).__name__}, Error details: {repr(e)}"
+            logger.error(error_message)
             if "rate limit" in str(e).lower() or "too many requests" in str(e).lower():
                 logger.error(f"Rate limited! Account {self.handle} may be temporarily locked.")
             if "Unexpected server response" in str(e) or "Handshake failed" in str(e):
