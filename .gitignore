@@ -3,6 +3,19 @@
 # Environment variables
 .env
 
+# Session files (contains JWT tokens)
+session_*.json
+SESSION_DATA.json
+session_data.json
+
+# Checkpoint files
+sync_checkpoint.txt
+*.checkpoint
+
+# DID files
+dids_to_add.txt
+dids_*.txt
+
 # Python
 __pycache__/
 *.py[cod]

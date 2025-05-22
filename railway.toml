@@ -1,0 +1,40 @@
+[build]
+# Use Python 3.13
+builder = "heroku/python"
+
+[deploy]
+# Start command for the main application
+startCommand = "python main.py --production"
+# Alternative start commands for different modes:
+# python main.py --test (for testing)
+# python main.py --interactive (for interactive diagnostics)
+
+[variables]
+# Default environment variables for Railway deployment
+LOG_LEVEL = "INFO"
+HEALTH_CHECK_INTERVAL = "300"
+MAX_CONSECUTIVE_FAILURES = "3"
+PERFORMANCE_MONITORING_ENABLED = "true"
+ENHANCED_LOGGING = "true"
+
+# Database connection will be automatically provided by Railway PostgreSQL addon
+# The following variables should be set in Railway dashboard:
+# - BLUESKY_HANDLE (your bot's handle)
+# - BLUESKY_PASSWORD (your bot's app password)
+# - SECONDARY_ACCOUNTS (optional, comma-separated handles)
+# - DATABASE_URL (automatically set by Railway PostgreSQL)
+
+[environments.production]
+# Production-specific variables
+variables = { }
+
+[environments.staging]
+# Staging-specific variables  
+variables = { LOG_LEVEL = "DEBUG" }
+
+# Railway will automatically detect requirements.txt and install dependencies
+# Railway will also automatically set PORT environment variable
+
+# Health check endpoint (if we add one in the future)
+# healthcheckPath = "/health"
+# healthcheckTimeout = 30 

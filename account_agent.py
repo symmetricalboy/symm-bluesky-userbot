@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import httpx
+import json
 from atproto import AsyncClient as ATProtoAsyncClient
 from atproto import AsyncFirehoseSubscribeReposClient
 from atproto_firehose.models import MessageFrame
@@ -34,8 +35,24 @@ logging.getLogger("websockets").setLevel(logging.WARNING)
 CLEARSKY_API_BASE_URL = os.getenv('CLEARSKY_API_URL', 'https://api.clearsky.services/api/v1/anon')
 # BLUESKY_API_URL is not directly used by ATProtoAsyncClient if not passed to constructor, it defaults to bsky.social
 
-# ClearSky Rate Limiting
-CLEARSKY_REQUEST_DELAY = 1.0  # 1 request per second, down from 4 req/sec to avoid rate limiting
+# ClearSky Rate Limiting - More conservative
+CLEARSKY_REQUEST_DELAY = 2.0  # Increased from 1.0 to 2.0 seconds between requests
+
+# Session Management Constants
+SESSION_FILE_PATH = "session_data.json"
+ACCESS_TOKEN_LIFETIME_MINUTES = 115  # Refresh before 2 hour expiry
+REFRESH_TOKEN_LIFETIME_DAYS = 55     # Refresh before 2 month expiry
+
+# Content Write Rate Limiting (Based on official limits)
+CONTENT_WRITE_POINTS_PER_HOUR = 4500   # Conservative, under 5000 limit
+CONTENT_WRITE_POINTS_PER_DAY = 30000   # Conservative, under 35000 limit
+CREATE_POINTS = 3
+UPDATE_POINTS = 2
+DELETE_POINTS = 1
+
+# API Request Rate Limiting
+API_REQUESTS_PER_5MIN = 2500  # Conservative, under 3000 limit
+REQUEST_INTERVAL_SECONDS = 0.12  # ~8 requests per second average
 
 # Firehose constants
 FIREHOSE_HOST = "bsky.network" # Updated to standard endpoint
@@ -60,38 +77,230 @@ class AccountAgent:
         self.mod_list_uri = None
         self._firehose_stop_event = asyncio.Event()
         self._blocks_monitor_stop_event = asyncio.Event()
+        
+        # Session management
+        self.session_file = f"{SESSION_FILE_PATH}_{self.handle.replace('.', '_')}.json"
+        self.last_request_time = 0
+        self.request_count_5min = 0
+        self.request_window_start = time.time()
+        
         logger.debug(f"AccountAgent initialized for {self.handle}")
 
+    def _get_session_file_path(self):
+        """Get session file path for this account."""
+        return f"session_{self.handle.replace('.', '_').replace('@', '_')}.json"
 
-    async def initialize(self):
-        logger.info(f"Initializing AccountAgent for {self.handle}...")
-        return await self.login()
-
-    async def login(self):
+    async def _load_session_from_file(self):
+        """Load existing session data from file."""
+        session_file = self._get_session_file_path()
+        if not os.path.exists(session_file):
+            logger.debug(f"No session file found for {self.handle}")
+            return None
+            
         try:
-            logger.info(f"Attempting login for {self.handle}...")
+            with open(session_file, 'r') as f:
+                session_data = json.load(f)
+            
+            required_fields = ['accessJwt', 'refreshJwt', 'did', 'handle', 'accessDate', 'refreshDate']
+            if not all(field in session_data for field in required_fields):
+                logger.warning(f"Invalid session file format for {self.handle}")
+                return None
+                
+            logger.info(f"Loaded existing session for {self.handle}")
+            return session_data
+        except Exception as e:
+            logger.error(f"Error loading session file for {self.handle}: {e}")
+            return None
+
+    async def _save_session_to_file(self, session_data):
+        """Save session data to file."""
+        session_file = self._get_session_file_path()
+        try:
+            with open(session_file, 'w') as f:
+                json.dump(session_data, f, indent=2)
+            logger.debug(f"Saved session data for {self.handle}")
+        except Exception as e:
+            logger.error(f"Error saving session file for {self.handle}: {e}")
+
+    def _is_access_token_expired(self, session_data):
+        """Check if access token needs refresh."""
+        try:
+            access_date = datetime.fromisoformat(session_data['accessDate'])
+            age_minutes = (datetime.now() - access_date).total_seconds() / 60
+            return age_minutes > ACCESS_TOKEN_LIFETIME_MINUTES
+        except Exception as e:
+            logger.error(f"Error checking access token expiry for {self.handle}: {e}")
+            return True
+
+    def _is_refresh_token_expired(self, session_data):
+        """Check if refresh token needs renewal."""
+        try:
+            refresh_date = datetime.fromisoformat(session_data['refreshDate'])
+            age_days = (datetime.now() - refresh_date).days
+            return age_days > REFRESH_TOKEN_LIFETIME_DAYS
+        except Exception as e:
+            logger.error(f"Error checking refresh token expiry for {self.handle}: {e}")
+            return True
+
+    async def _refresh_access_token(self, session_data):
+        """Refresh access token using refresh token."""
+        try:
+            logger.info(f"Refreshing access token for {self.handle}")
+            
+            # Use httpx directly for refresh to avoid ATProto client complications
+            refresh_url = f"{self.client.base_url}/xrpc/com.atproto.server.refreshSession"
+            headers = {
+                'Authorization': f'Bearer {session_data["refreshJwt"]}',
+                'Content-Type': 'application/json'
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(refresh_url, headers=headers)
+                
+            if response.status_code != 200:
+                logger.error(f"Failed to refresh token for {self.handle}: {response.status_code} {response.text}")
+                return None
+                
+            refresh_response = response.json()
+            
+            # Update session data
+            session_data['accessJwt'] = refresh_response['accessJwt']
+            session_data['refreshJwt'] = refresh_response['refreshJwt']
+            session_data['accessDate'] = datetime.now().isoformat()
+            
+            await self._save_session_to_file(session_data)
+            logger.info(f"Successfully refreshed access token for {self.handle}")
+            return session_data
+            
+        except Exception as e:
+            logger.error(f"Error refreshing access token for {self.handle}: {e}")
+            return None
+
+    async def _rate_limit_request(self):
+        """Implement request rate limiting to avoid exceeding API limits."""
+        current_time = time.time()
+        
+        # Reset 5-minute window if needed
+        if current_time - self.request_window_start >= 300:  # 5 minutes
+            self.request_count_5min = 0
+            self.request_window_start = current_time
+        
+        # Check if we're approaching 5-minute limit
+        if self.request_count_5min >= API_REQUESTS_PER_5MIN:
+            sleep_time = 300 - (current_time - self.request_window_start)
+            if sleep_time > 0:
+                logger.warning(f"Rate limit approaching for {self.handle}, sleeping {sleep_time:.1f}s")
+                await asyncio.sleep(sleep_time)
+                self.request_count_5min = 0
+                self.request_window_start = time.time()
+        
+        # Ensure minimum interval between requests
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < REQUEST_INTERVAL_SECONDS:
+            sleep_time = REQUEST_INTERVAL_SECONDS - time_since_last
+            await asyncio.sleep(sleep_time)
+        
+        self.last_request_time = time.time()
+        self.request_count_5min += 1
+
+    async def _login_with_session_management(self):
+        """Enhanced login method with session management and token reuse."""
+        # Try to load existing session
+        session_data = await self._load_session_from_file()
+        
+        if session_data:
+            # Check if refresh token is still valid
+            if self._is_refresh_token_expired(session_data):
+                logger.info(f"Refresh token expired for {self.handle}, need full login")
+                session_data = None
+            elif self._is_access_token_expired(session_data):
+                logger.info(f"Access token expired for {self.handle}, refreshing")
+                session_data = await self._refresh_access_token(session_data)
+                
+        if session_data:
+            # Use existing session
+            try:
+                # Manually set the session in the client
+                from atproto_client.client.session import Session
+                session_string = f"{session_data['handle']}:::{session_data['did']}:::{session_data['accessJwt']}:::{session_data['refreshJwt']}"
+                
+                profile = await self.client.login(session_string=session_string)
+                self.did = profile.did
+                logger.info(f"Logged in using saved session for {self.handle} (DID: {self.did})")
+                
+                # Register account in database
+                self.account_id = await self.database.register_account(
+                    self.handle,
+                    self.did,
+                    is_primary=self.is_primary
+                )
+                logger.info(f"Account {self.handle} registered with ID {self.account_id}")
+                
+                # Create/update moderation list if primary
+                if self.is_primary:
+                    try:
+                        await self.create_or_update_moderation_list()
+                    except Exception as e:
+                        logger.error(f"Error creating/updating moderation list for {self.handle}: {e}", exc_info=True)
+                
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Failed to use saved session for {self.handle}: {e}")
+                logger.info(f"Falling back to full login for {self.handle}")
+                
+        # Perform full login
+        await self._rate_limit_request()  # Rate limit the login attempt
+        
+        try:
+            logger.info(f"Performing full login for {self.handle}")
             profile = await self.client.login(self.handle, self.password)
             self.did = profile.did
-            logger.info(f"Logged in as {self.handle} (DID: {self.did})")
-
+            logger.info(f"Full login successful for {self.handle} (DID: {self.did})")
+            
+            # Register account in database
             self.account_id = await self.database.register_account(
                 self.handle,
                 self.did,
                 is_primary=self.is_primary
             )
             logger.info(f"Account {self.handle} registered with ID {self.account_id}")
-
+            
+            # Create/update moderation list if primary
             if self.is_primary:
                 try:
                     await self.create_or_update_moderation_list()
                 except Exception as e:
                     logger.error(f"Error creating/updating moderation list for {self.handle}: {e}", exc_info=True)
+            
+            # Save session data
+            session_data = {
+                'handle': self.handle,
+                'did': self.did,
+                'accessJwt': self.client.session.access_jwt,
+                'refreshJwt': self.client.session.refresh_jwt,
+                'accessDate': datetime.now().isoformat(),
+                'refreshDate': datetime.now().isoformat()
+            }
+            await self._save_session_to_file(session_data)
+            
             return True
+            
         except Exception as e:
-            logger.error(f"Failed to login as {self.handle}: {e}", exc_info=True)
+            logger.error(f"Full login failed for {self.handle}: {e}")
+            if "rate limit" in str(e).lower() or "too many requests" in str(e).lower():
+                logger.error(f"Rate limited! Account {self.handle} may be temporarily locked.")
             if "Unexpected server response" in str(e) or "Handshake failed" in str(e):
                 logger.error("This might be a network issue or Bluesky server problem. Check connection and server status.")
             return False
+
+    async def login(self):
+        """Legacy login method - redirects to session management."""
+        return await self._login_with_session_management()
+
+    async def initialize(self):
+        logger.info(f"Initializing AccountAgent for {self.handle}...")
+        return await self._login_with_session_management()
 
     async def create_or_update_moderation_list(self):
         if not self.is_primary:
@@ -105,41 +314,108 @@ class AccountAgent:
         try:
             logger.info(f"Creating or updating moderation list for primary account {self.handle}...")
             
-            list_record_data = ListRecord(
-                purpose=list_purpose,
-                name=list_name,
-                description=list_description,
-                created_at=self.client.get_current_time_iso()
-            )
+            # First, check if we already have a moderation list in the database
+            existing_db_list = await self.database.get_primary_mod_list()
+            if existing_db_list:
+                logger.info(f"Found existing moderation list in database: {existing_db_list['list_uri']}")
+                
+                # Verify the list still exists on Bluesky and update name/description if needed
+                try:
+                    list_response = await self.client.app.bsky.graph.get_list(params={"list": existing_db_list['list_uri']})
+                    if list_response and list_response.list:
+                        existing_list = list_response.list
+                        
+                        # Check if name or description needs updating
+                        needs_update = (existing_list.name != list_name or 
+                                      (hasattr(existing_list, 'description') and existing_list.description != list_description))
+                        
+                        if needs_update:
+                            logger.info(f"Updating moderation list name/description...")
+                            list_record_data = ListRecord(
+                                purpose=list_purpose,
+                                name=list_name,
+                                description=list_description,
+                                created_at=existing_list.indexed_at
+                            )
+                            
+                            data = PutRecordData(
+                                repo=self.did,
+                                collection='app.bsky.graph.list',
+                                rkey=existing_db_list['list_uri'].split('/')[-1],
+                                record=list_record_data.model_dump(exclude_none=True, by_alias=True)
+                            )
+                            response = await self.client.com.atproto.repo.put_record(data=data)
+                            
+                            # Update database record with new name
+                            await self.database.update_mod_list_name_description(
+                                existing_db_list['list_uri'], list_name, list_description
+                            )
+                            logger.info(f"Updated moderation list name to '{list_name}' and description")
+                        
+                        self.mod_list_uri = existing_db_list['list_uri']
+                        return existing_db_list['list_uri']
+                        
+                except Exception as e:
+                    logger.warning(f"Could not verify existing list {existing_db_list['list_uri']} on Bluesky: {e}")
+                    # Continue to create a new list if verification fails
             
+            # If no database record or verification failed, search for existing lists on Bluesky
             existing_list = None
             try:
-                logger.debug(f"Fetching existing lists for {self.did}...")
+                logger.debug(f"Searching for existing moderation lists on Bluesky for {self.did}...")
                 lists_response = await self.client.app.bsky.graph.get_lists(params={"actor": self.did})
+                
+                # Look for any moderation list (be more flexible with naming)
                 for lst in lists_response.lists:
-                    if lst.name == list_name and lst.purpose == list_purpose:
+                    if lst.purpose == list_purpose:
                         existing_list = lst
-                        logger.info(f"Found existing moderation list: {lst.uri}")
+                        logger.info(f"Found existing moderation list on Bluesky: {lst.uri} (name: '{lst.name}')")
                         break
+                        
                 if not existing_list:
-                    logger.info(f"No existing moderation list found with name '{list_name}' for {self.did}.")
+                    logger.info(f"No existing moderation list found on Bluesky for {self.did}.")
             except Exception as e:
                 logger.warning(f"Could not fetch existing lists for {self.did}: {e}", exc_info=True)
             
             if existing_list:
-                logger.info(f"Updating existing moderation list {existing_list.uri} for {self.handle}...")
-                data = PutRecordData(
-                    repo=self.did,
-                    collection='app.bsky.graph.list',
-                    rkey=existing_list.uri.split('/')[-1],
-                    record=list_record_data.model_dump(exclude_none=True, by_alias=True)
-                )
-                response = await self.client.com.atproto.repo.put_record(data=data)
+                # Found existing list, register it in database and optionally update
+                logger.info(f"Registering existing moderation list {existing_list.uri} in database...")
+                
+                needs_update = (existing_list.name != list_name or 
+                              (hasattr(existing_list, 'description') and existing_list.description != list_description))
+                
+                if needs_update:
+                    logger.info(f"Updating existing moderation list {existing_list.uri} name/description...")
+                    list_record_data = ListRecord(
+                        purpose=list_purpose,
+                        name=list_name,
+                        description=list_description,
+                        created_at=existing_list.indexed_at
+                    )
+                    
+                    data = PutRecordData(
+                        repo=self.did,
+                        collection='app.bsky.graph.list',
+                        rkey=existing_list.uri.split('/')[-1],
+                        record=list_record_data.model_dump(exclude_none=True, by_alias=True)
+                    )
+                    response = await self.client.com.atproto.repo.put_record(data=data)
+                    list_cid = str(response.cid)
+                    logger.info(f"Updated existing moderation list: {existing_list.uri} (CID: {list_cid})")
+                else:
+                    list_cid = str(existing_list.cid) if hasattr(existing_list, 'cid') else "unknown"
+                
                 list_uri = existing_list.uri
-                list_cid = str(response.cid) 
-                logger.info(f"Updated existing moderation list: {list_uri} (CID: {list_cid})")
             else:
+                # No existing list found, create a new one
                 logger.info(f"Creating new moderation list for {self.handle}...")
+                list_record_data = ListRecord(
+                    purpose=list_purpose,
+                    name=list_name,
+                    description=list_description,
+                    created_at=self.client.get_current_time_iso()
+                )
+                
                 data = CreateRecordData(
                     repo=self.did,
                     collection='app.bsky.graph.list',
@@ -150,6 +426,7 @@ class AccountAgent:
                 list_cid = str(response.cid)
                 logger.info(f"Created new moderation list: {list_uri} (CID: {list_cid})")
             
+            # Register/update in database
             self.mod_list_uri = list_uri
             await self.database.register_mod_list(
                 list_uri=list_uri,
@@ -159,6 +436,7 @@ class AccountAgent:
             )
             logger.info(f"Moderation list {list_uri} registered in DB for {self.handle}.")
             return list_uri
+            
         except Exception as e:
             logger.error(f"Error creating/updating moderation list for {self.handle}: {e}", exc_info=True)
             return None
@@ -839,26 +1117,54 @@ class AccountAgent:
 
         if dids_to_add:
             logger.info(f"MOD_LIST_SYNC ({self.handle}): Adding {len(dids_to_add)} DIDs to moderation list {self.mod_list_uri}...")
-            for i, did_to_add in enumerate(list(dids_to_add)): 
-                try:
-                    logger.debug(f"MOD_LIST_SYNC ({self.handle}): Adding DID {did_to_add} ({i+1}/{len(dids_to_add)})...")
-                    list_item_record = ListItemRecord(
-                        subject=did_to_add, list=self.mod_list_uri,
-                        created_at=self.client.get_current_time_iso()
-                    )
-                    data = CreateRecordData(
-                        repo=self.did, 
-                        collection='app.bsky.graph.listitem',
-                        record=list_item_record.model_dump(exclude_none=True, by_alias=True)
-                    )
-                    await self.client.com.atproto.repo.create_record(data=data)
-                    logger.info(f"MOD_LIST_SYNC ({self.handle}): Successfully added {did_to_add} to mod list.")
-                    await asyncio.sleep(0.1) 
-                except Exception as e:
-                     if "Conflict" in str(e) or "Record already exists" in str(e):
-                        logger.debug(f"MOD_LIST_SYNC ({self.handle}): Item {did_to_add} likely already added to mod list (Conflict/Exists). Error: {e}")
-                     else:
-                        logger.error(f"MOD_LIST_SYNC ({self.handle}): Error adding {did_to_add} to mod list {self.mod_list_uri}: {e}", exc_info=True)
+            
+            # Process in batches to avoid overwhelming the API and handle rate limits
+            BATCH_SIZE = 100
+            total_dids = len(dids_to_add)
+            success_count = 0
+            error_count = 0
+            skipped_count = 0
+            
+            dids_list = list(dids_to_add)
+            total_batches = (total_dids + BATCH_SIZE - 1) // BATCH_SIZE  # Ceiling division
+            
+            for batch_num in range(total_batches):
+                start_idx = batch_num * BATCH_SIZE
+                end_idx = min(start_idx + BATCH_SIZE, total_dids)
+                batch = dids_list[start_idx:end_idx]
+                
+                logger.info(f"MOD_LIST_SYNC ({self.handle}): Processing batch {batch_num + 1}/{total_batches} with {len(batch)} DIDs...")
+                
+                for did_idx, did_to_add in enumerate(batch):
+                    try:
+                        logger.debug(f"MOD_LIST_SYNC ({self.handle}): Adding DID {did_to_add} (Batch {batch_num + 1}, Item {did_idx + 1}/{len(batch)})...")
+                        list_item_record = ListItemRecord(
+                            subject=did_to_add, list=self.mod_list_uri,
+                            created_at=self.client.get_current_time_iso()
+                        )
+                        data = CreateRecordData(
+                            repo=self.did, 
+                            collection='app.bsky.graph.listitem',
+                            record=list_item_record.model_dump(exclude_none=True, by_alias=True)
+                        )
+                        await self.client.com.atproto.repo.create_record(data=data)
+                        success_count += 1
+                        # Small delay between API calls to avoid rate limiting
+                        await asyncio.sleep(0.2) 
+                    except Exception as e:
+                        if "Conflict" in str(e) or "Record already exists" in str(e):
+                            logger.debug(f"MOD_LIST_SYNC ({self.handle}): Item {did_to_add} likely already added to mod list (Conflict/Exists).")
+                            skipped_count += 1
+                        else:
+                            logger.error(f"MOD_LIST_SYNC ({self.handle}): Error adding {did_to_add} to mod list {self.mod_list_uri}: {e}", exc_info=True)
+                            error_count += 1
+                
+                # Add a larger delay between batches to avoid rate limiting
+                if batch_num < total_batches - 1:  # Skip delay after last batch
+                    logger.info(f"MOD_LIST_SYNC ({self.handle}): Completed batch {batch_num + 1}/{total_batches}. Waiting before next batch...")
+                    await asyncio.sleep(2)
+            
+            logger.info(f"MOD_LIST_SYNC ({self.handle}): Addition summary: Added {success_count}, Skipped {skipped_count}, Errors {error_count} out of {total_dids} DIDs")
         
         if dids_to_remove:
             logger.info(f"MOD_LIST_SYNC ({self.handle}): Removing {len(dids_to_remove)} DIDs from moderation list {self.mod_list_uri}...")
