@@ -389,6 +389,16 @@ class Database:
         """Execute the add blocked account logic"""
         async with connection_pool.acquire() as conn:
             async with conn.transaction():
+                # WHITELIST CHECK: Never add our own accounts to blocked_accounts
+                is_our_account = await conn.fetchval(
+                    "SELECT COUNT(*) FROM accounts WHERE did = $1",
+                    did
+                )
+                
+                if is_our_account > 0:
+                    contextual_logger.warning(f"🛡️  WHITELIST PROTECTION: Preventing addition of our own account {did} to blocked_accounts")
+                    return  # Exit early without adding
+                
                 # Get source account's primary status
                 source_is_primary = await conn.fetchval(
                     "SELECT is_primary FROM accounts WHERE id = $1",
