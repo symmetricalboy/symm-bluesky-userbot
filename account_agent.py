@@ -230,7 +230,13 @@ class AccountAgent:
             commit_data: FirehoseCommitModel = message.data
             current_seq = commit_data.seq # Ensure we use commit's seq, which should always exist for #commit
 
-            logger.debug(f"FIREHOSE_HANDLER ({self.did}): Processing commit. Repo: {commit_data.repo}, Seq: {current_seq}, Prev: {commit_data.prev}, Ops: {len(commit_data.ops)}, Blocks Size: {len(commit_data.blocks) if commit_data.blocks else 0}")
+            # Add more detailed logging about the commit for debugging
+            logger.info(f"FIREHOSE_HANDLER ({self.did}): Processing commit. Repo: {commit_data.repo}, Seq: {current_seq}")
+            logger.info(f"FIREHOSE_HANDLER ({self.did}): Commit details - Ops: {len(commit_data.ops)}, Blocks Size: {len(commit_data.blocks) if commit_data.blocks else 0}")
+            
+            # Log operation details for debugging
+            for op_idx, op in enumerate(commit_data.ops[:3]):  # Log first 3 operations
+                logger.info(f"FIREHOSE_HANDLER ({self.did}): Operation {op_idx+1}: Action={op.action}, Path={op.path}, CID={op.cid}")
 
             if commit_data.repo != self.did:
                 logger.debug(f"FIREHOSE_HANDLER ({self.did}): Commit repo {commit_data.repo} does not match self.did. Skipping. Saving cursor {current_seq}.")
@@ -611,6 +617,15 @@ class AccountAgent:
         try:
             blocked_accounts = self.database.get_all_blocked_accounts()
             logger.info(f"PRIMARY_SYNC ({self.handle}): Database contains {len(blocked_accounts)} total blocked accounts records (including all accounts and types)")
+            
+            # Log sample of block records for debugging
+            logger.info(f"PRIMARY_SYNC ({self.handle}): Sample of block records:")
+            for idx, record in enumerate(blocked_accounts[:5]):  # Log just first 5 records
+                logger.info(f"PRIMARY_SYNC ({self.handle}): Block record {idx+1}: "
+                          f"DID={record.get('did', 'unknown')}, "
+                          f"Type={record.get('block_type', 'unknown')}, "
+                          f"Source={record.get('source_account_handle', 'unknown')}, "
+                          f"Synced={record.get('is_synced', False)}")
             
             # Get the total number of blocked DIDs to help with debugging
             unique_dids = set(record['did'] for record in blocked_accounts if record.get('did'))
