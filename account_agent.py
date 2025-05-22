@@ -222,7 +222,6 @@ class AccountAgent:
             # Use existing session
             try:
                 # Manually set the session in the client
-                from atproto_client.client.session import Session
                 session_string = f"{session_data['handle']}:::{session_data['did']}:::{session_data['accessJwt']}:::{session_data['refreshJwt']}"
                 
                 profile = await self.client.login(session_string=session_string)
@@ -256,7 +255,12 @@ class AccountAgent:
         
         try:
             logger.info(f"Performing full login for {self.handle}")
-            profile = await self.client.login(self.handle, self.password)
+            try:
+                profile = await self.client.login(self.handle, self.password)
+            except Exception as login_exc:
+                logger.error(f"ATPROTO LOGIN DIRECT EXCEPTION for {self.handle}: Type={type(login_exc).__name__}, Details={repr(login_exc)}", exc_info=True)
+                raise # Re-raise to be caught by the outer handler or become the primary error
+            
             self.did = profile.did
             logger.info(f"Full login successful for {self.handle} (DID: {self.did})")
             
@@ -272,8 +276,8 @@ class AccountAgent:
             if self.is_primary:
                 try:
                     await self.create_or_update_moderation_list()
-                except Exception as e:
-                    logger.error(f"Error creating/updating moderation list for {self.handle}: {e}", exc_info=True)
+                except Exception as e_modlist: # Changed 'e' to 'e_modlist' to avoid conflict
+                    logger.error(f"Error creating/updating moderation list for {self.handle}: {e_modlist}", exc_info=True)
             
             # Save session data
             # In the current atproto library, JWT tokens are accessed via export_session_string()
@@ -291,10 +295,13 @@ class AccountAgent:
             await self._save_session_to_file(session_data)
             
             return True
-            
+        except UnboundLocalError as ule:
+            # This catches the specific UnboundLocalError if it's raised directly by login() or by subsequent code if login() was weird
+            logger.error(f"ATPROTO LOGIN (CAUGHT UNBOUNDLOCALERROR) for {self.handle}: {repr(ule)}", exc_info=True)
+            return False
         except Exception as e:
             error_message = f"Full login failed for {self.handle}. Error type: {type(e).__name__}, Error details: {repr(e)}"
-            logger.error(error_message)
+            logger.error(error_message, exc_info=True) # Added exc_info=True
             if "rate limit" in str(e).lower() or "too many requests" in str(e).lower():
                 logger.error(f"Rate limited! Account {self.handle} may be temporarily locked.")
             if "Unexpected server response" in str(e) or "Handshake failed" in str(e):
