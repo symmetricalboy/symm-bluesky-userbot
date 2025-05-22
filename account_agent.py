@@ -6,6 +6,7 @@ import json
 from atproto import AsyncClient as ATProtoAsyncClient
 from atproto import AsyncFirehoseSubscribeReposClient
 from atproto_firehose.models import MessageFrame
+from atproto_client import Session
 from atproto_client.models.app.bsky.graph.list import Record as ListRecord
 from atproto_client.models.app.bsky.graph.listitem import Record as ListItemRecord
 from atproto_client.models.app.bsky.graph.block import Record as BlockRecord
@@ -274,11 +275,15 @@ class AccountAgent:
                     logger.error(f"Error creating/updating moderation list for {self.handle}: {e}", exc_info=True)
             
             # Save session data
+            # In the current atproto library, JWT tokens are accessed via export_session_string()
+            session_string = self.client.export_session_string()
+            session_obj = Session.decode(session_string)
+            
             session_data = {
                 'handle': self.handle,
                 'did': self.did,
-                'accessJwt': self.client.session.access_jwt,
-                'refreshJwt': self.client.session.refresh_jwt,
+                'accessJwt': session_obj.access_jwt,
+                'refreshJwt': session_obj.refresh_jwt,
                 'accessDate': datetime.now().isoformat(),
                 'refreshDate': datetime.now().isoformat()
             }
