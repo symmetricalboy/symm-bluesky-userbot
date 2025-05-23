@@ -100,22 +100,22 @@ class ProductionOrchestrator:
                     self.logger.error("❌ Database setup failed")
                     return False
             
-            # Phase 3: Account initialization
+            # Phase 3: Account initialization (creates accounts with placeholder DIDs)
             async with logged_operation("Account Initialization", self.logger):
                 if not await self._initialize_accounts():
                     self.logger.error("❌ Account initialization failed")
                     return False
             
-            # Phase 4: ClearSky population (optional)
-            if not skip_clearsky_init:
-                async with logged_operation("ClearSky Population", self.logger):
-                    await self._populate_clearsky_data()
-            
-            # Phase 5: Agent initialization
+            # Phase 4: Agent initialization (updates DIDs to real ones)
             async with logged_operation("Agent Initialization", self.logger):
                 if not await self._initialize_agents():
                     self.logger.error("❌ Agent initialization failed")
                     return False
+            
+            # Phase 5: ClearSky population (now that we have real DIDs)
+            if not skip_clearsky_init:
+                async with logged_operation("ClearSky Population", self.logger):
+                    await self._populate_clearsky_data()
             
             # Phase 6: Moderation list sync (optional)
             if not skip_modlist_sync:
