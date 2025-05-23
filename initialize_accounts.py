@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 from dotenv import load_dotenv
 from database import Database
@@ -28,19 +29,22 @@ IS_PRIMARY = {
     "did:plc:kkylvufgv5shv2kpd74lca6o": False,  # symm.now
 }
 
-def initialize_accounts():
+async def initialize_accounts():
     """Initialize the accounts in the database"""
     logger.info("Initializing accounts in the database...")
     
     db = Database()
-    if not db.test_connection():
-        logger.error("Database connection test failed. Cannot initialize accounts.")
+    try:
+        await db.test_connection()
+        logger.info("Database connection test passed.")
+    except Exception as e:
+        logger.error(f"Database connection test failed: {e}")
         return False
     
     for did, handle in DID_TO_HANDLE.items():
         is_primary = IS_PRIMARY.get(did, False)
         try:
-            account_id = db.register_account(handle, did, is_primary)
+            account_id = await db.register_account(handle, did, is_primary)
             logger.info(f"Registered account {handle} (DID: {did}) as {'PRIMARY' if is_primary else 'secondary'} with ID: {account_id}")
         except Exception as e:
             logger.error(f"Failed to register account {handle} (DID: {did}): {e}")
@@ -49,4 +53,4 @@ def initialize_accounts():
     return True
 
 if __name__ == "__main__":
-    initialize_accounts() 
+    asyncio.run(initialize_accounts()) 

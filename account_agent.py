@@ -20,7 +20,7 @@ from atproto_core.car import CAR
 import cbor2
 from database import Database
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import clearsky_helpers as cs 
 
 # Set up logging
@@ -44,15 +44,15 @@ ACCESS_TOKEN_LIFETIME_MINUTES = 115  # Refresh before 2 hour expiry
 REFRESH_TOKEN_LIFETIME_DAYS = 55     # Refresh before 2 month expiry
 
 # Content Write Rate Limiting (Based on official limits)
-CONTENT_WRITE_POINTS_PER_HOUR = 4500   # Conservative, under 5000 limit
-CONTENT_WRITE_POINTS_PER_DAY = 30000   # Conservative, under 35000 limit
+CONTENT_WRITE_POINTS_PER_HOUR = 3000   # More conservative, well under 5000 limit
+CONTENT_WRITE_POINTS_PER_DAY = 25000   # More conservative, well under 35000 limit
 CREATE_POINTS = 3
 UPDATE_POINTS = 2
 DELETE_POINTS = 1
 
 # API Request Rate Limiting
-API_REQUESTS_PER_5MIN = 2500  # Conservative, under 3000 limit
-REQUEST_INTERVAL_SECONDS = 0.12  # ~8 requests per second average
+API_REQUESTS_PER_5MIN = 2000  # More conservative, well under 3000 limit
+REQUEST_INTERVAL_SECONDS = 1.0  # 1 request per second average (much more conservative)
 
 # Firehose constants
 FIREHOSE_HOST = "bsky.network" # Updated to standard endpoint
@@ -169,7 +169,11 @@ class AccountAgent:
         """Check if access token needs refresh."""
         try:
             access_date = datetime.fromisoformat(session_data['accessDate'])
-            age_minutes = (datetime.now() - access_date).total_seconds() / 60
+            # Make sure both datetimes are timezone-aware or both are naive
+            if access_date.tzinfo is None:
+                access_date = access_date.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            age_minutes = (now - access_date).total_seconds() / 60
             return age_minutes > ACCESS_TOKEN_LIFETIME_MINUTES
         except Exception as e:
             logger.error(f"Error checking access token expiry for {self.handle}: {e}")
@@ -179,7 +183,11 @@ class AccountAgent:
         """Check if refresh token needs renewal."""
         try:
             refresh_date = datetime.fromisoformat(session_data['refreshDate'])
-            age_days = (datetime.now() - refresh_date).days
+            # Make sure both datetimes are timezone-aware or both are naive
+            if refresh_date.tzinfo is None:
+                refresh_date = refresh_date.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            age_days = (now - refresh_date).days
             return age_days > REFRESH_TOKEN_LIFETIME_DAYS
         except Exception as e:
             logger.error(f"Error checking refresh token expiry for {self.handle}: {e}")
@@ -209,7 +217,7 @@ class AccountAgent:
             # Update session data
             session_data['accessJwt'] = refresh_response['accessJwt']
             session_data['refreshJwt'] = refresh_response['refreshJwt']
-            session_data['accessDate'] = datetime.now().isoformat()
+            session_data['accessDate'] = datetime.now(timezone.utc).isoformat()
             
             # Save updated session data
             await self._save_session_to_storage(session_data)
@@ -256,6 +264,27 @@ class AccountAgent:
         self.last_request_time = time.time()
         self.request_count_5min += 1
 
+    async def _rate_limited_api_call(self, func, *args, max_retries=3, retry_delay=30, **kwargs):
+        """Wrapper for API calls with rate limiting and retry logic."""
+        for attempt in range(max_retries):
+            try:
+                await self._rate_limit_request()
+                return await func(*args, **kwargs)
+            except Exception as e:
+                error_str = str(e).lower()
+                if "rate limit" in error_str or "429" in error_str or "ratelimitexceeded" in error_str:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Rate limit hit for {self.handle} (attempt {attempt + 1}/{max_retries}). Waiting {retry_delay} seconds...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        logger.error(f"Rate limit persists for {self.handle} after {max_retries} attempts. Giving up.")
+                        raise
+                else:
+                    # Non-rate-limit error, re-raise immediately
+                    raise
+        
     async def _login_with_session_management(self):
         """Enhanced login method with session management and token reuse."""
         # Try to load existing session
@@ -347,8 +376,8 @@ class AccountAgent:
                 'did': self.did,
                 'accessJwt': session_obj.access_jwt,
                 'refreshJwt': session_obj.refresh_jwt,
-                'accessDate': datetime.now().isoformat(),
-                'refreshDate': datetime.now().isoformat()
+                'accessDate': datetime.now(timezone.utc).isoformat(),
+                'refreshDate': datetime.now(timezone.utc).isoformat()
             }
             await self._save_session_to_storage(session_data)
             
@@ -1191,7 +1220,7 @@ class AccountAgent:
             logger.info(f"MOD_LIST_SYNC ({self.handle}): Adding {len(dids_to_add)} DIDs to moderation list {self.mod_list_uri}...")
             
             # Process in batches to avoid overwhelming the API and handle rate limits
-            BATCH_SIZE = 100
+            BATCH_SIZE = 50  # Reduced from 100 to 50 to be more conservative
             total_dids = len(dids_to_add)
             success_count = 0
             error_count = 0
@@ -1219,22 +1248,24 @@ class AccountAgent:
                             collection='app.bsky.graph.listitem',
                             record=list_item_record.model_dump(exclude_none=True, by_alias=True)
                         )
-                        await self.client.com.atproto.repo.create_record(data=data)
+                        await self._rate_limited_api_call(
+                            self.client.com.atproto.repo.create_record,
+                            data=data
+                        )
                         success_count += 1
-                        # Small delay between API calls to avoid rate limiting
-                        await asyncio.sleep(0.2) 
                     except Exception as e:
-                        if "Conflict" in str(e) or "Record already exists" in str(e):
+                        error_str = str(e).lower()
+                        if "conflict" in error_str or "record already exists" in error_str:
                             logger.debug(f"MOD_LIST_SYNC ({self.handle}): Item {did_to_add} likely already added to mod list (Conflict/Exists).")
                             skipped_count += 1
                         else:
-                            logger.error(f"MOD_LIST_SYNC ({self.handle}): Error adding {did_to_add} to mod list {self.mod_list_uri}: {e}", exc_info=True)
+                            logger.error(f"MOD_LIST_SYNC ({self.handle}): Error adding {did_to_add} to mod list {self.mod_list_uri}: {e}")
                             error_count += 1
                 
                 # Add a larger delay between batches to avoid rate limiting
                 if batch_num < total_batches - 1:  # Skip delay after last batch
                     logger.info(f"MOD_LIST_SYNC ({self.handle}): Completed batch {batch_num + 1}/{total_batches}. Waiting before next batch...")
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(10)  # Increased from 2 to 10 seconds
             
             logger.info(f"MOD_LIST_SYNC ({self.handle}): Addition summary: Added {success_count}, Skipped {skipped_count}, Errors {error_count} out of {total_dids} DIDs")
         
@@ -1248,11 +1279,11 @@ class AccountAgent:
                 try:
                     rkey = list_item_uri.split('/')[-1]
                     logger.debug(f"MOD_LIST_SYNC ({self.handle}): Removing DID {did_to_remove} (rkey: {rkey}) ({i+1}/{len(dids_to_remove)})...")
-                    await self.client.com.atproto.repo.delete_record(
+                    await self._rate_limited_api_call(
+                        self.client.com.atproto.repo.delete_record,
                         repo=self.did, collection='app.bsky.graph.listitem', rkey=rkey
                     )
-                    logger.info(f"MOD_LIST_SYNC ({self.handle}): Successfully removed {did_to_remove} (rkey: {rkey}) from mod list.")
-                    await asyncio.sleep(0.1) 
+                    logger.info(f"MOD_LIST_SYNC ({self.handle}): Successfully removed {did_to_remove} (rkey: {rkey}) from mod list.") 
                 except Exception as e:
                     logger.error(f"MOD_LIST_SYNC ({self.handle}): Error removing {did_to_remove} (rkey: {rkey}) from mod list {self.mod_list_uri}: {e}", exc_info=True)
         
@@ -1364,13 +1395,13 @@ class AccountAgent:
         sync_interval_seconds = (sync_interval_primary_min if self.is_primary else sync_interval_secondary_min) * 60
         
         # Track when the last full ClearSky sync was performed
-        last_full_clearsky_sync = datetime.now() - timedelta(hours=FULL_SYNC_INTERVAL_HOURS + 1)  # Force an initial full sync
+        last_full_clearsky_sync = datetime.now(timezone.utc) - timedelta(hours=FULL_SYNC_INTERVAL_HOURS + 1)  # Force an initial full sync
 
         logger.info(f"LEGACY_MONITOR ({self.handle}): Performing initial data sync cycle as part of loop startup...")
         try:
             # Set initial_sync=True to perform a complete sync, including ClearSky data
             await self.sync_all_account_data(initial_sync=True) 
-            last_full_clearsky_sync = datetime.now()  # Update after successful sync
+            last_full_clearsky_sync = datetime.now(timezone.utc)  # Update after successful sync
             logger.info(f"LEGACY_MONITOR ({self.handle}): Initial full sync completed. Next full ClearSky sync scheduled for {last_full_clearsky_sync + timedelta(hours=FULL_SYNC_INTERVAL_HOURS)}")
         except Exception as e_initial_sync:
             logger.error(f"LEGACY_MONITOR ({self.handle}): Error during initial data sync in monitor loop: {e_initial_sync}", exc_info=True)
@@ -1389,7 +1420,7 @@ class AccountAgent:
                     break 
             except asyncio.TimeoutError:
                 # Timeout means stop event was not set, time to sync
-                now = datetime.now()
+                now = datetime.now(timezone.utc)
                 time_since_full_sync = now - last_full_clearsky_sync
                 needs_full_clearsky_sync = time_since_full_sync.total_seconds() >= FULL_SYNC_INTERVAL_HOURS * 3600
                 
